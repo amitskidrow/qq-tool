@@ -50,6 +50,18 @@ def _echo_if_interactive(interactive: bool, msg: str) -> None:
         console.print(msg)
 
 
+# --- int64 helpers for simhash storage ---
+def _to_i64(n: int) -> int:
+    """Convert unsigned 64-bit to signed 64-bit range for SQLite INTEGER."""
+    n64 = n & ((1 << 64) - 1)
+    return n64 - (1 << 64) if n64 >= (1 << 63) else n64
+
+
+def _to_u64(n: int) -> int:
+    """Normalize Python int to unsigned 64-bit representation for bit ops."""
+    return n & ((1 << 64) - 1)
+
+
 @app.callback(invoke_without_command=True)
 def _root(
     ctx: typer.Context,
@@ -346,7 +358,7 @@ def ingest(
     for fpath in files:
         text = read_text_file(fpath)
         doc_hash = content_hash(text)
-        doc_sim = simhash_text64(text)
+        doc_sim = _to_u64(simhash_text64(text))
 
         # find existing entries for this source (by uri)
         try:
@@ -361,7 +373,8 @@ def ingest(
             row0 = found[0]
             existing_hash = row0["hash"] if "hash" in row0.keys() else None
             try:
-                existing_sim = int(row0["simhash"]) if row0["simhash"] is not None else 0
+                raw_sim = int(row0["simhash"]) if row0["simhash"] is not None else 0
+                existing_sim = _to_u64(raw_sim)
             except Exception:
                 existing_sim = 0
             if existing_hash == doc_hash:
@@ -431,7 +444,7 @@ def ingest(
                     title=fpath.name,
                     meta=meta,
                     hash_=doc_hash,
-                    simhash=int(doc_sim),
+                    simhash=_to_i64(doc_sim),
                     created_at=now_ist().isoformat(),
                     updated_at=now_ist().isoformat(),
                 )
@@ -614,7 +627,7 @@ def export(ns: Optional[str] = typer.Option(None, "--ns")):
             "meta": json.loads(r["meta"] or "{}"),
             "text": r["text"],
             "hash": r["hash"],
-            "simhash": r["simhash"],
+            "simhash": int(r["simhash"]) & ((1 << 64) - 1) if r["simhash"] is not None else None,
         }
         typer.echo(json.dumps({"id": int(r["id"]), "payload": payload}, ensure_ascii=False))
 
