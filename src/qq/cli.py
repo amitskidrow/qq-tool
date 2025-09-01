@@ -180,6 +180,7 @@ def migrate_qdrant(
             if next_offset is None:
                 break
     typer.echo(json.dumps({"migrated": migrated, "namespace": ns_final}))
+@app.command()
 def setup(ctx: typer.Context):
     """First-run checks; writes $HOME/.qq/config.yaml and verifies external services."""
     ensure_dirs()
