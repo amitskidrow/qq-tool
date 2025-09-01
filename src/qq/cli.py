@@ -121,65 +121,7 @@ def rebuild_fts():
         raise typer.Exit(code=1)
 
 
-@app.command("migrate.qdrant")
-def migrate_qdrant(
-    url: str = typer.Option("http://localhost:6333", "--url"),
-    collection: str = typer.Option("qq_data", "--collection"),
-    api_key: Optional[str] = typer.Option(None, "--api-key"),
-    ns: Optional[str] = typer.Option(None, "--ns", help="Namespace filter; default: infer current"),
-    batch: int = typer.Option(256, "--batch"),
-):
-    """One-time migration from Qdrant to SQLite. Requires 'qdrant-client' installed."""
-    try:
-        from qdrant_client import QdrantClient  # type: ignore
-        from qdrant_client.http.models import Filter, FieldCondition, MatchValue  # type: ignore
-    except Exception:
-        console.print("[red]qdrant-client not installed[/red]: pip install qdrant-client to use this command")
-        raise typer.Exit(code=2)
-
-    store = _get_store()
-    try:
-        from .embeddings import embedding_dim
-        store.ensure_schema(embedding_dim())
-    except Exception:
-        pass
-
-    client = QdrantClient(url=url, api_key=api_key)
-    ns_final = ns or infer_namespace()
-    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
-    next_offset = None
-    migrated = 0
-    with console.status("Migrating from Qdrant..."):
-        while True:
-            pts, next_offset = client.scroll(collection_name=collection, scroll_filter=filt, limit=batch, offset=next_offset, with_payload=True, with_vectors=True)
-            if not pts:
-                break
-            for p in pts:
-                pl = p.payload or {}
-                text = pl.get("text") or ""
-                uri = pl.get("source") or "migrate:qdrant"
-                title = (pl.get("title") or str(uri).split("/")[-1]) if isinstance(uri, str) else None
-                meta = {k: v for k, v in (pl or {}).items() if k not in {"text", "title"}}
-                vec = np.array(p.vector, dtype=np.float32) if getattr(p, "vector", None) is not None else None
-                if vec is None:
-                    # fallback: embed if missing
-                    vec = embed_texts([text])[0]
-                store.upsert_chunk(
-                    uri=str(uri),
-                    namespace=pl.get("namespace") or ns_final,
-                    text=text,
-                    vector=vec,
-                    title=title,
-                    meta=meta,
-                    hash_=pl.get("hash") or pl.get("doc_hash"),
-                    simhash=int(pl.get("simhash") or 0) if pl.get("simhash") is not None else None,
-                    created_at=None,
-                    updated_at=None,
-                )
-                migrated += 1
-            if next_offset is None:
-                break
-    typer.echo(json.dumps({"migrated": migrated, "namespace": ns_final}))
+    
 @app.command()
 def setup(ctx: typer.Context):
     """First-run checks; writes $HOME/.qq/config.yaml and verifies external services."""

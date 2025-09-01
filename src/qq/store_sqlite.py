@@ -39,7 +39,21 @@ class SqliteVecStore:
             raise RuntimeError(
                 "sqlite-vec is required. Please install the 'sqlite-vec' package"
             ) from e
-        sqlite_vec.load(self.conn)
+        # Enable extension loading if supported; required on some Python builds
+        try:
+            self.conn.enable_load_extension(True)  # type: ignore[attr-defined]
+        except Exception:
+            # If unavailable, sqlite_vec.load may still work if it uses connection hooks
+            pass
+        try:
+            sqlite_vec.load(self.conn)
+        except Exception as e:
+            # Provide clearer guidance for the common 'not authorized' error when
+            # extension loading is disabled at the connection level.
+            msg = str(e)
+            if "not authorized" in msg.lower():
+                raise RuntimeError("sqlite-vec extension load failed: not authorized (enable extension loading)") from e
+            raise
 
     def exec(self, sql: str, args: Tuple | Sequence = ()):
         return self.conn.execute(sql, args)
@@ -388,4 +402,3 @@ class SqliteVecStore:
             check("orphan_consistency", False, str(e))
 
         return out
-
