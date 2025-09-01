@@ -91,16 +91,35 @@ install_remote() {
   if command -v uvx >/dev/null 2>&1; then
     echo "Checking via uvx from $spec"
     uvx --from "$spec" qq --version || echo "uvx qq --version failed"
-    return 0
   fi
 
+  # Prefer global install with uv tool so 'which qq' resolves
+  if command -v uv >/dev/null 2>&1; then
+    echo "Installing globally via: uv tool install --force --from $spec qq"
+    if UV_TOOL_OUT=$(uv tool install --force --from "$spec" qq 2>&1); then
+      echo "$UV_TOOL_OUT" | sed -n '1,80p'
+      echo "qq --version -> $(qq --version 2>&1 || true)"
+      echo "which qq -> $(command -v qq || echo not found)"
+      return 0
+    else
+      echo -e "uv tool install failed, output follows:\n$UV_TOOL_OUT"
+    fi
+  fi
+
+  # Fallback to pipx if available
   if command -v pipx >/dev/null 2>&1; then
-    echo "Checking via pipx from $spec"
-    pipx run --spec "$spec" qq --version || echo "pipx qq --version failed"
-    return 0
+    echo "Installing globally via: pipx install --force --spec $spec qq"
+    if PIPX_OUT=$(pipx install --force --spec "$spec" qq 2>&1); then
+      echo "$PIPX_OUT" | sed -n '1,80p'
+      echo "qq --version -> $(qq --version 2>&1 || true)"
+      echo "which qq -> $(command -v qq || echo not found)"
+      return 0
+    else
+      echo -e "pipx install failed, output follows:\n$PIPX_OUT"
+    fi
   fi
 
-  echo "Neither uvx nor pipx found; skipping remote install check"
+  echo "No uv or pipx found; performed only ephemeral uvx check"
 }
 
 main() {

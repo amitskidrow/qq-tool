@@ -41,9 +41,9 @@ def _echo_if_interactive(interactive: bool, msg: str) -> None:
         console.print(msg)
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def _root(
-    version: Optional[bool] = typer.Option(None, "--version", help="Show version and exit", is_eager=True),
+    version: Optional[bool] = typer.Option(None, "--version", "-V", help="Show version and exit", is_eager=True),
     interactive: bool = typer.Option(False, "-i", help="Interactive mode for humans"),
 ):
     if version:
@@ -51,6 +51,12 @@ def _root(
         raise typer.Exit()
     # store interactive flag in global state
     app.extra["interactive"] = interactive
+
+
+@app.command("version")
+def _version_cmd():
+    """Print version and exit."""
+    typer.echo(__version__)
 
 
 def _is_ready(url: str, api_key: Optional[str] = None) -> bool:

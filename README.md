@@ -2,7 +2,7 @@ qq — local context server + CLI
 
 Quickstart
 
-- Install (uvx): `uvx install --from . qq` or with pipx: `pipx install .`
+- Install (uv tools): `uv tool install --from . qq` or with pipx: `pipx install .`
 - First run: `qq setup`
 - Doctor: `qq doctor`
 - Start API: `qq serve`
