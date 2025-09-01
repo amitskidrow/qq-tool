@@ -36,6 +36,16 @@ console = Console(stderr=True)
 app = typer.Typer(add_completion=False, no_args_is_help=True, context_settings={"help_option_names": ["-h", "--help"]})
 
 
+def _interactive_from_ctx(ctx: typer.Context) -> bool:
+    try:
+        obj = getattr(ctx, "obj", None)
+        if isinstance(obj, dict):
+            return bool(obj.get("interactive", False))
+    except Exception:
+        pass
+    return False
+
+
 def _echo_if_interactive(interactive: bool, msg: str) -> None:
     if interactive:
         console.print(msg)
@@ -43,14 +53,18 @@ def _echo_if_interactive(interactive: bool, msg: str) -> None:
 
 @app.callback(invoke_without_command=True)
 def _root(
+    ctx: typer.Context,
     version: Optional[bool] = typer.Option(None, "--version", "-V", help="Show version and exit", is_eager=True),
     interactive: bool = typer.Option(False, "-i", help="Interactive mode for humans"),
 ):
     if version:
         typer.echo(__version__)
         raise typer.Exit()
-    # store interactive flag in global state
-    app.extra["interactive"] = interactive
+    # store interactive flag in context object
+    if ctx.obj is None:
+        ctx.obj = {}
+    if isinstance(ctx.obj, dict):
+        ctx.obj["interactive"] = interactive
 
 
 @app.command("version")
@@ -74,7 +88,7 @@ def _is_ready(url: str, api_key: Optional[str] = None) -> bool:
 
 
 @app.command()
-def setup():
+def setup(ctx: typer.Context):
     """First-run checks; writes $HOME/.qq/config.yaml and verifies external services."""
     ensure_dirs()
     cfg = load_config()
@@ -93,7 +107,7 @@ def setup():
             highlight=False,
         )
     else:
-        _echo_if_interactive(app.extra.get("interactive", False), f"Qdrant reachable at {qdrant_url}")
+        _echo_if_interactive(_interactive_from_ctx(ctx), f"Qdrant reachable at {qdrant_url}")
         # Collection creation is deferred to first ingest so we can size vectors correctly.
 
     # Keys presence (do not fail )
@@ -251,6 +265,7 @@ def chat(
 
 @app.command()
 def ingest(
+    ctx: typer.Context,
     path: str = typer.Argument(..., help="File or directory to ingest"),
     ns: Optional[str] = typer.Option(None, "--ns", help="Namespace override"),
     allow_replace: bool = typer.Option(False, "--allow-replace", help="Replace existing doc for same source"),
@@ -288,7 +303,7 @@ def ingest(
         console.print(f"[red]Failed to prepare collection[/red]: {e}")
         raise typer.Exit(code=1)
 
-    interactive = bool(app.extra.get("interactive", False))
+    interactive = _interactive_from_ctx(ctx)
     ns_final = ns or infer_namespace()
 
     from qdrant_client.http.models import PointStruct, Filter, FieldCondition, Match
@@ -517,6 +532,7 @@ def todo(action: str = typer.Argument("list", help="list|resolve"), tid: Optiona
 
 @app.command()
 def crud(
+    ctx: typer.Context,
     delete: bool = typer.Option(False, "--delete"),
     ids: Optional[str] = typer.Option(None, "--ids", help="Comma-separated point ids for delete"),
     search: Optional[str] = typer.Option(None, "--search", help="Search query"),
@@ -558,7 +574,7 @@ def crud(
             "text": insert_text,
             "source": "crud:insert",
         }
-        pid = kb_insert(client, collection, payload, interactive=app.extra.get("interactive", False), force=force)
+        pid = kb_insert(client, collection, payload, interactive=_interactive_from_ctx(ctx), force=force)
         typer.echo(json.dumps({"inserted": pid}))
         return
 

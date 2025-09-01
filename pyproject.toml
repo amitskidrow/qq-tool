@@ -1,6 +1,6 @@
 [project]
 name = "qq"
-version = "0.0.4"
+version = "0.0.5"
 description = "qq – local context server + CLI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-qq = "qq.cli:app"
+qq = "qq.entry:main"
 
 [build-system]
 requires = ["hatchling>=1.24"]

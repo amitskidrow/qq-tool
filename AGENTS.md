@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - Source: `src/qq` (CLI in `cli.py`, API in `api.py`, retrieval in `vector_store/`, models in `models/`).
 - Config/state: `$HOME/.qq/` (overridable via `QQ_HOME`). Files include `config.yaml`, `sessions/`, `usage/`, `audit/`, `todos/`.
-- Packaging: `pyproject.toml` (hatchling). Entry point script: `qq` → `qq.cli:app`.
+- Packaging: `pyproject.toml` (hatchling). Entry point script: `qq` → `qq.entry:main`.
 
 ## Build, Test, and Development Commands
 - Install (editable): `pip install -e .` (Python ≥3.10). Alternative: `uv pip install -e .`.
