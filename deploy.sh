@@ -7,8 +7,10 @@ timestamp() {
   date +"%Y-%m-%d %H:%M:%S"
 }
 
+# Bump patch version in pyproject.toml and src/qq/__init__.py
 bump_version() {
   local pyproject="$ROOT_DIR/pyproject.toml"
+  local init_py="$ROOT_DIR/src/qq/__init__.py"
   if [[ ! -f "$pyproject" ]]; then
     echo "pyproject.toml not found; skipping version bump"
     return 0
@@ -26,33 +28,85 @@ bump_version() {
   fi
   local next_patch=$((PATCH + 1))
   local next_version="${MAJOR}.${MINOR}.${next_patch}"
+  # Update pyproject
   sed -i -E 's/^(version = ")[0-9]+\.[0-9]+\.[0-9]+(")/\1'"${next_version}"'\2/' "$pyproject"
+  # Update package __version__ for CLI --version
+  if [[ -f "$init_py" ]]; then
+    sed -i -E 's/^(__version__ = ")[0-9]+\.[0-9]+\.[0-9]+(")/\1'"${next_version}"'\2/' "$init_py"
+  fi
   echo "Bumped version: ${current} -> ${next_version}"
 }
 
 commit_and_push() {
   local ts
   ts=$(timestamp)
-  git add -A
-  if ! git diff --staged --quiet; then
+  git -C "$ROOT_DIR" add -A
+  if ! git -C "$ROOT_DIR" diff --staged --quiet; then
     local v
     v=$(sed -nE 's/^version = "([^"]+)"/\1/p' "$ROOT_DIR/pyproject.toml" | head -n1 || true)
     if [[ -n "$v" ]]; then
-      git commit -m "chore(qq): release v${v} (${ts})"
+      git -C "$ROOT_DIR" commit -m "chore(release): v${v} (${ts})"
     else
-      git commit -m "qq auto deploy: ${ts}"
+      git -C "$ROOT_DIR" commit -m "Auto deploy: ${ts}"
     fi
     echo "Committed changes"
   else
     echo "No changes to commit"
   fi
-  git push origin main || true
+  git -C "$ROOT_DIR" push origin main || true
+}
+
+# Convert origin URL to a PEP 508 VCS spec suitable for uvx/pipx
+origin_spec() {
+  local origin
+  origin=$(git -C "$ROOT_DIR" remote get-url origin 2>/dev/null || echo "")
+  if [[ -z "$origin" ]]; then
+    echo ""; return 0
+  fi
+  local https
+  if [[ "$origin" =~ ^git@github.com:(.*)\.git$ ]]; then
+    https="https://github.com/${BASH_REMATCH[1]}.git"
+  elif [[ "$origin" =~ ^ssh://git@github.com/(.*)\.git$ ]]; then
+    https="https://github.com/${BASH_REMATCH[1]}.git"
+  else
+    https="$origin"
+  fi
+  if [[ "$https" != git+* ]]; then
+    https="git+${https}"
+  fi
+  # default to @main ref
+  if [[ "$https" != *"@"* ]]; then
+    https="${https}@main"
+  fi
+  echo "$https"
+}
+
+install_remote() {
+  echo "Waiting for remote to be ready..."
+  sleep 15
+
+  local spec
+  spec=$(origin_spec)
+
+  if command -v uvx >/dev/null 2>&1; then
+    echo "Checking via uvx from $spec"
+    uvx --from "$spec" qq --version || echo "uvx qq --version failed"
+    return 0
+  fi
+
+  if command -v pipx >/dev/null 2>&1; then
+    echo "Checking via pipx from $spec"
+    pipx run --spec "$spec" qq --version || echo "pipx qq --version failed"
+    return 0
+  fi
+
+  echo "Neither uvx nor pipx found; skipping remote install check"
 }
 
 main() {
   bump_version
   commit_and_push
+  install_remote
 }
 
 main "$@"
-
