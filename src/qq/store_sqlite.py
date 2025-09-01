@@ -30,6 +30,15 @@ class SqliteVecStore:
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self.conn.execute("PRAGMA foreign_keys=ON;")
+        # Ensure sqlite-vec virtual table module is available for this connection.
+        # Without this, referencing existing vec_index yields "no such module: vec0"
+        # on new processes/connections.
+        try:
+            self.load_vec0()
+        except Exception:
+            # Defer hard failure to vector-using operations so non-vector paths
+            # (e.g., config print) can still work in constrained envs.
+            pass
 
     # --- Low-level helpers ---
     def load_vec0(self) -> None:
