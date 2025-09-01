@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointStruct, PointIdsList
+import uuid
 
 from ..audit import append_audit
 from ..embeddings import embed_texts
@@ -33,7 +34,8 @@ def kb_insert(client, collection: str, payload: Dict, interactive: bool = False,
     v = embed_texts([text])[0]
     h = content_hash(text)
     sh = int(simhash_text64(text))
-    pid = f"{h}-0"
+    # Deterministic UUID to satisfy Qdrant's point ID requirements
+    pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{h}-0"))
     payload = {**payload, "hash": h, "simhash": sh}
     pt = PointStruct(id=pid, vector=v.tolist(), payload=payload)
     client.upsert(collection_name=collection, points=[pt], wait=True)

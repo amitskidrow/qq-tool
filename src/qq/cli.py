@@ -312,6 +312,7 @@ def ingest(
     ns_final = ns or infer_namespace()
 
     from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
+    import uuid
 
     ingested = 0
     for fpath in files:
@@ -371,8 +372,8 @@ def ingest(
         # delete old entries if replacing
         if decision == "replace" and found:
             # delete by filter on source
-            from qdrant_client.http.models import Filter, FieldCondition, Match as QMatch, FilterSelector
-            del_f = Filter(must=[FieldCondition(key="source", match=QMatch(value=str(fpath)))])
+            from qdrant_client.http.models import Filter, FieldCondition, MatchValue as QMatchValue, FilterSelector
+            del_f = Filter(must=[FieldCondition(key="source", match=QMatchValue(value=str(fpath)))])
             try:
                 client.delete(collection_name=collection, points_selector=FilterSelector(filter=del_f))
             except Exception:
@@ -385,7 +386,8 @@ def ingest(
         # upsert
         points: list[PointStruct] = []
         for i, (ch, v) in enumerate(zip(chunks, vecs)):
-            pid = f"{doc_hash}-{i}"
+            # Use deterministic UUID5 for valid Qdrant point IDs
+            pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_hash}-{i}"))
             payload = {
                 "namespace": ns_final,
                 "type": "general_info",
