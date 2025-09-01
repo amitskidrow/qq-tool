@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from qdrant_client.http.models import Filter, FieldCondition, Match, PointStruct, PointIdsList
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointStruct, PointIdsList
 
 from ..audit import append_audit
 from ..embeddings import embed_texts
@@ -16,7 +16,7 @@ def kb_search(client, collection: str, ns: str, q: str, topk: int = 5):
     from ..embeddings import embed_texts
 
     qv = embed_texts([q])[0]
-    filt = Filter(must=[FieldCondition(key="namespace", match=Match(value=ns))])
+    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns))])
     res = client.search(collection_name=collection, query_vector=qv.tolist(), limit=topk, query_filter=filt)
     out = []
     for p in res:

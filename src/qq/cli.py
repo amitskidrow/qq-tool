@@ -177,6 +177,7 @@ def session(
 
 @app.command()
 def chat(
+    message: Optional[str] = typer.Argument(None, help="Prompt to ask (positional alternative to --ask)"),
     new: bool = typer.Option(False, "--new"),
     session_id: Optional[str] = typer.Option(None, "--session", help="Session id"),
     ask: Optional[str] = typer.Option(None, "--ask", help="Prompt to ask in session"),
@@ -192,6 +193,10 @@ def chat(
     api_key = qdrant_cfg.get("api_key")
     client = vs_connect(qdrant_url, api_key)
 
+    # Allow positional message as a shorthand for --ask
+    if ask is None and message is not None:
+        ask = message
+
     if new:
         if not session_id:
             console.print("--session required with --new")
@@ -201,7 +206,7 @@ def chat(
         return
 
     if not session_id:
-        console.print("Provide --session to resume")
+        console.print("Provide --session to resume (or create with --new --session <id>)")
         raise typer.Exit(code=2)
     s = load_session(session_id)
     # TTL check
@@ -306,7 +311,7 @@ def ingest(
     interactive = _interactive_from_ctx(ctx)
     ns_final = ns or infer_namespace()
 
-    from qdrant_client.http.models import PointStruct, Filter, FieldCondition, Match
+    from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
 
     ingested = 0
     for fpath in files:
@@ -315,7 +320,7 @@ def ingest(
         doc_sim = simhash_text64(text)
 
         # find existing entries for this source
-        filt = Filter(must=[FieldCondition(key="source", match=Match(value=str(fpath)))])
+        filt = Filter(must=[FieldCondition(key="source", match=MatchValue(value=str(fpath)))])
         try:
             found, _ = client.scroll(collection_name=collection, scroll_filter=filt, limit=3)
         except Exception as e:
@@ -441,9 +446,9 @@ def query(
         raise typer.Exit(code=1)
 
     # Filter by ns if provided/inferred
-    from qdrant_client.http.models import Filter, FieldCondition, Match
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
     ns_final = ns or infer_namespace()
-    filt = Filter(must=[FieldCondition(key="namespace", match=Match(value=ns_final))])
+    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
 
     try:
         res = client.search(collection_name=collection, query_vector=q_vec.tolist(), limit=max(topk, 20), query_filter=filt)
@@ -591,8 +596,8 @@ def export(ns: Optional[str] = typer.Option(None, "--ns")):
     api_key = qdrant_cfg.get("api_key")
     client = vs_connect(qdrant_url, api_key)
     ns_final = ns or infer_namespace()
-    from qdrant_client.http.models import Filter, FieldCondition, Match
-    filt = Filter(must=[FieldCondition(key="namespace", match=Match(value=ns_final))])
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
     next_offset = None
     while True:
         pts, next_offset = client.scroll(collection_name=collection, scroll_filter=filt, limit=256, offset=next_offset)

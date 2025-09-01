@@ -31,10 +31,10 @@ def build_app() -> FastAPI:
         api_key = qdrant_cfg.get("api_key")
         client = vs_connect(qdrant_url, api_key)
         try:
-            from qdrant_client.http.models import Filter, FieldCondition, Match
+            from qdrant_client.http.models import Filter, FieldCondition, MatchValue
             q_vec = embed_texts([q])[0]
             ns_final = ns or infer_namespace()
-            filt = Filter(must=[FieldCondition(key="namespace", match=Match(value=ns_final))])
+            filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
             res = client.search(collection_name=collection, query_vector=q_vec.tolist(), limit=topk, query_filter=filt)
             out = []
             for p in res:

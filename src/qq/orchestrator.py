@@ -10,10 +10,10 @@ from .util import infer_namespace
 
 
 def vector_retrieve(client, collection: str, q: str, ns: str, topk: int = 8):
-    from qdrant_client.http.models import Filter, FieldCondition, Match
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
     q_vec = embed_texts([q])[0]
-    filt = Filter(must=[FieldCondition(key="namespace", match=Match(value=ns))])
+    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns))])
     res = client.search(collection_name=collection, query_vector=q_vec.tolist(), limit=topk, query_filter=filt)
     contexts = []
     for p in res:
@@ -42,4 +42,3 @@ def answer(client, collection: str, provider: str, model: str, question: str, ns
     if not out.get("citations"):
         out["citations"] = [{"id": c["id"], "source": c["source"], "score": c["score"]} for c in ctx[:5]]
     return out
-
