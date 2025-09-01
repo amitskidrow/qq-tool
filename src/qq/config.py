@@ -40,12 +40,9 @@ def default_config() -> Dict[str, Any]:
             "timezone": "Asia/Kolkata",
             "ttl_hours": 24,
         },
-        "vector_store": {
-            # Assumes Qdrant is running locally (container or service) without auth
-            "url": "http://localhost:6333",
-            "collection": "qq_data",
-            # Optional: set when Qdrant runs with API key auth
-            "api_key": None,
+        "database": {
+            # Local SQLite database path for retrieval store
+            "path": str(DEFAULT_HOME / "qq.db"),
         },
         "usage": {
             "mode": "daily",

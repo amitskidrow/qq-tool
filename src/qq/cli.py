@@ -7,7 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import httpx
 import typer
 import uvicorn
 from rich.console import Console
@@ -16,20 +15,20 @@ from . import __version__
 from .api import build_app
 from .config import CONFIG_PATH, ensure_dirs, load_config, save_config
 from .errors import QQErrorCodes
-from .vector_store import connect as vs_connect, ensure_collection as vs_ensure
+from .store_sqlite import SqliteVecStore
 from .util import infer_namespace, is_supported_file, read_text_file, now_ist
 from .hashing import content_hash
 from .simhash import simhash_text64, hamming64
 from .chunking import simple_chunks
 from .embeddings import embed_texts, embedding_dim
 from .audit import append_audit
-from .hybrid import bm25_rank, hybrid_merge
+# Hybrid utils kept for potential rerank/analysis; not used directly here
 from .sessions import create_session, load_session, save_session, list_sessions, close_session
 from .usage import add_usage, get_usage, remaining
 from .orchestrator import answer as orchestrated_answer
 from .tokens import rough_token_count
 from .todos import load_todos, add_todo, resolve_todo
-from .tools.crud import kb_search, kb_insert, kb_update, kb_delete
+# Qdrant-based CRUD removed; SQLite store handles CRUD directly
 
 
 console = Console(stderr=True)
@@ -73,21 +72,114 @@ def _version_cmd():
     typer.echo(__version__)
 
 
-def _is_ready(url: str, api_key: Optional[str] = None) -> bool:
-    base = url.rstrip("/")
-    headers = {"api-key": api_key} if api_key else None
+def _get_store() -> SqliteVecStore:
+    cfg = load_config()
+    db_path = cfg.get("database", {}).get("path")
+    if not db_path:
+        raise RuntimeError("database.path not configured. Run 'qq config reset' to regenerate config.")
+    return SqliteVecStore(Path(db_path))
+
+
+def _db_ready() -> bool:
     try:
-        r = httpx.get(base + "/healthz", headers=headers, timeout=1.5)
-        if r.status_code == 200:
-            return True
-        # Fallback: try listing collections (works on older images)
-        r2 = httpx.get(base + "/collections", headers=headers, timeout=1.5)
-        return r2.status_code == 200
+        store = _get_store()
+        # Ensure schema exists with current embedding dimension if missing
+        dim = store.get_dim()
+        if dim is None:
+            from .embeddings import embedding_dim
+            store.ensure_schema(embedding_dim())
+        else:
+            # verify vec0 loads
+            store.load_vec0()
+        return True
     except Exception:
         return False
 
 
 @app.command()
+def db_init():
+    """Initialize the SQLite database and store embedding dimension."""
+    try:
+        store = _get_store()
+        from .embeddings import embedding_dim
+        store.ensure_schema(embedding_dim())
+        typer.echo(json.dumps({"ok": True, "path": str(store.db_path), "dim": store.get_dim()}))
+    except Exception as e:
+        console.print(f"[red]db.init failed[/red]: {e}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def rebuild_fts():
+    """Rebuild the FTS index from docs."""
+    try:
+        store = _get_store()
+        n = store.rebuild_fts()
+        typer.echo(json.dumps({"rebuilt": n}))
+    except Exception as e:
+        console.print(f"[red]rebuild-fts failed[/red]: {e}")
+        raise typer.Exit(code=1)
+
+
+@app.command("migrate.qdrant")
+def migrate_qdrant(
+    url: str = typer.Option("http://localhost:6333", "--url"),
+    collection: str = typer.Option("qq_data", "--collection"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+    ns: Optional[str] = typer.Option(None, "--ns", help="Namespace filter; default: infer current"),
+    batch: int = typer.Option(256, "--batch"),
+):
+    """One-time migration from Qdrant to SQLite. Requires 'qdrant-client' installed."""
+    try:
+        from qdrant_client import QdrantClient  # type: ignore
+        from qdrant_client.http.models import Filter, FieldCondition, MatchValue  # type: ignore
+    except Exception:
+        console.print("[red]qdrant-client not installed[/red]: pip install qdrant-client to use this command")
+        raise typer.Exit(code=2)
+
+    store = _get_store()
+    try:
+        from .embeddings import embedding_dim
+        store.ensure_schema(embedding_dim())
+    except Exception:
+        pass
+
+    client = QdrantClient(url=url, api_key=api_key)
+    ns_final = ns or infer_namespace()
+    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
+    next_offset = None
+    migrated = 0
+    with console.status("Migrating from Qdrant..."):
+        while True:
+            pts, next_offset = client.scroll(collection_name=collection, scroll_filter=filt, limit=batch, offset=next_offset, with_payload=True, with_vectors=True)
+            if not pts:
+                break
+            for p in pts:
+                pl = p.payload or {}
+                text = pl.get("text") or ""
+                uri = pl.get("source") or "migrate:qdrant"
+                title = (pl.get("title") or str(uri).split("/")[-1]) if isinstance(uri, str) else None
+                meta = {k: v for k, v in (pl or {}).items() if k not in {"text", "title"}}
+                vec = np.array(p.vector, dtype=np.float32) if getattr(p, "vector", None) is not None else None
+                if vec is None:
+                    # fallback: embed if missing
+                    vec = embed_texts([text])[0]
+                store.upsert_chunk(
+                    uri=str(uri),
+                    namespace=pl.get("namespace") or ns_final,
+                    text=text,
+                    vector=vec,
+                    title=title,
+                    meta=meta,
+                    hash_=pl.get("hash") or pl.get("doc_hash"),
+                    simhash=int(pl.get("simhash") or 0) if pl.get("simhash") is not None else None,
+                    created_at=None,
+                    updated_at=None,
+                )
+                migrated += 1
+            if next_offset is None:
+                break
+    typer.echo(json.dumps({"migrated": migrated, "namespace": ns_final}))
 def setup(ctx: typer.Context):
     """First-run checks; writes $HOME/.qq/config.yaml and verifies external services."""
     ensure_dirs()
@@ -97,18 +189,17 @@ def setup(ctx: typer.Context):
     if not CONFIG_PATH.exists():
         save_config(cfg)
 
-    # Probe Qdrant
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    ok = _is_ready(qdrant_url, qdrant_cfg.get("api_key"))
-    if not ok:
+    # Prepare SQLite store
+    try:
+        store = _get_store()
+        from .embeddings import embedding_dim
+        store.ensure_schema(embedding_dim())
+        _echo_if_interactive(_interactive_from_ctx(ctx), f"SQLite store ready at {store.db_path}")
+    except Exception as e:
         console.print(
-            f"[yellow]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/yellow]: Qdrant not reachable at {qdrant_url}. Ensure a local container/service is running.",
+            f"[yellow]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/yellow]: SQLite not ready ({e})",
             highlight=False,
         )
-    else:
-        _echo_if_interactive(_interactive_from_ctx(ctx), f"Qdrant reachable at {qdrant_url}")
-        # Collection creation is deferred to first ingest so we can size vectors correctly.
 
     # Keys presence (do not fail )
     openai_present = bool(os.getenv("OPENAI_API_KEY"))
@@ -127,11 +218,18 @@ def doctor():
     cfg = load_config()
     hard_fail = False
 
-    # Vector
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    if not _is_ready(qdrant_url, qdrant_cfg.get("api_key")):
-        console.print(f"[red]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/red]: {qdrant_url}")
+    # DB
+    try:
+        store = _get_store()
+        rep = store.doctor()
+        if not rep.get("ok"):
+            console.print(f"[red]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/red]: SQLite issues")
+            for c in rep.get("checks", []):
+                if not c.get("ok"):
+                    console.print(f" - {c.get('name')}: {c.get('detail')}")
+            hard_fail = True
+    except Exception as e:
+        console.print(f"[red]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/red]: {e}")
         hard_fail = True
 
     # Model keys (warn only)
@@ -186,12 +284,7 @@ def chat(
     ns: Optional[str] = typer.Option(None, "--ns"),
 ):
     """Create/resume chat sessions. When --ask provided, runs answer mode with retrieval and usage caps."""
-    cfg = load_config()
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    collection = qdrant_cfg.get("collection", "qq_data")
-    api_key = qdrant_cfg.get("api_key")
-    client = vs_connect(qdrant_url, api_key)
+    store = _get_store()
 
     # Allow positional message as a shorthand for --ask
     if ask is None and message is not None:
@@ -239,7 +332,7 @@ def chat(
 
     # Orchestrate answer with retrieval
     try:
-        out = orchestrated_answer(client, collection, active_provider, active_model, ask, ns or infer_namespace())
+        out = orchestrated_answer(store, active_provider, active_model, ask, ns or infer_namespace())
     except Exception as e:
         console.print(f"[red]Answer failed[/red]: {e}")
         raise typer.Exit(code=1)
@@ -280,12 +373,7 @@ def ingest(
     Non-interactive: duplicate/near-duplicate raises error unless --allow-replace.
     Interactive (-i): prompts to skip/replace.
     """
-    cfg = load_config()
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    collection = qdrant_cfg.get("collection", "qq_data")
-    api_key = qdrant_cfg.get("api_key")
-    client = vs_connect(qdrant_url, api_key)
+    store = _get_store()
 
     # Discover files
     p = Path(path)
@@ -300,19 +388,16 @@ def ingest(
         console.print(f"Path not found or unsupported: {path}")
         raise typer.Exit(code=2)
 
-    # Ensure collection with correct vector size (lazy-create)
+    # Ensure DB schema
     try:
         vec_dim = embedding_dim()
-        vs_ensure(client, collection, vec_dim)
+        store.ensure_schema(vec_dim)
     except Exception as e:
-        console.print(f"[red]Failed to prepare collection[/red]: {e}")
+        console.print(f"[red]Failed to prepare database[/red]: {e}")
         raise typer.Exit(code=1)
 
     interactive = _interactive_from_ctx(ctx)
     ns_final = ns or infer_namespace()
-
-    from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
-    import uuid
 
     ingested = 0
     for fpath in files:
@@ -320,12 +405,11 @@ def ingest(
         doc_hash = content_hash(text)
         doc_sim = simhash_text64(text)
 
-        # find existing entries for this source
-        filt = Filter(must=[FieldCondition(key="source", match=MatchValue(value=str(fpath)))])
+        # find existing entries for this source (by uri)
         try:
-            found, _ = client.scroll(collection_name=collection, scroll_filter=filt, limit=3)
+            found = store.list_by_uri(str(fpath))
         except Exception as e:
-            console.print(f"[red]Scroll error[/red]: {e}")
+            console.print(f"[red]Lookup error[/red]: {e}")
             raise typer.Exit(code=1)
 
         decision = "insert"
@@ -371,11 +455,8 @@ def ingest(
 
         # delete old entries if replacing
         if decision == "replace" and found:
-            # delete by filter on source
-            from qdrant_client.http.models import Filter, FieldCondition, MatchValue as QMatchValue, FilterSelector
-            del_f = Filter(must=[FieldCondition(key="source", match=QMatchValue(value=str(fpath)))])
             try:
-                client.delete(collection_name=collection, points_selector=FilterSelector(filter=del_f))
+                store.delete_ids([int(r["id"]) for r in found])
             except Exception:
                 pass
 
@@ -384,38 +465,41 @@ def ingest(
         vecs = embed_texts(chunks)
 
         # upsert
-        points: list[PointStruct] = []
-        for i, (ch, v) in enumerate(zip(chunks, vecs)):
-            # Use deterministic UUID5 for valid Qdrant point IDs
-            pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_hash}-{i}"))
-            payload = {
-                "namespace": ns_final,
+        try:
+            n_chunks = 0
+            meta_base = {
                 "type": "general_info",
                 "importance": 1,
                 "severity": 0,
                 "priority": 0,
                 "freshness_ts": int(now_ist().timestamp()),
-                "source": str(fpath),
-                "hash": doc_hash,
                 "doc_hash": doc_hash,
-                "chunk_idx": i,
-                "simhash": int(doc_sim),
-                "text": ch,
             }
-            points.append(PointStruct(id=pid, vector=v.tolist(), payload=payload))
-
-        try:
-            client.upsert(collection_name=collection, points=points, wait=True)
+            for i, (ch, v) in enumerate(zip(chunks, vecs)):
+                meta = {**meta_base, "chunk_idx": i}
+                store.upsert_chunk(
+                    uri=str(fpath),
+                    namespace=ns_final,
+                    text=ch,
+                    vector=v,
+                    title=fpath.name,
+                    meta=meta,
+                    hash_=doc_hash,
+                    simhash=int(doc_sim),
+                    created_at=now_ist().isoformat(),
+                    updated_at=now_ist().isoformat(),
+                )
+                n_chunks += 1
             ingested += 1
             append_audit({
                 "ts": now_ist().isoformat(),
                 "action": decision,
                 "source": str(fpath),
                 "ns": ns_final,
-                "chunks": len(points),
+                "chunks": n_chunks,
                 "doc_hash": doc_hash,
             })
-            typer.echo(f"ingested {fpath} ({len(points)} chunks)")
+            typer.echo(f"ingested {fpath} ({n_chunks} chunks)")
         except Exception as e:
             console.print(f"[red]Upsert failed[/red]: {e}")
             raise typer.Exit(code=1)
@@ -433,12 +517,7 @@ def query(
     hybrid_pool: int = typer.Option(200, "--hybrid-pool", help="Max docs to consider for BM25 within namespace"),
 ):
     """Vector mode: return top-N chunks with citations & metadata."""
-    cfg = load_config()
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    collection = qdrant_cfg.get("collection", "qq_data")
-    api_key = qdrant_cfg.get("api_key")
-    client = vs_connect(qdrant_url, api_key)
+    store = _get_store()
 
     # Embed query
     try:
@@ -448,76 +527,38 @@ def query(
         raise typer.Exit(code=1)
 
     # Filter by ns if provided/inferred
-    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
     ns_final = ns or infer_namespace()
-    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
 
     try:
-        res = client.search(collection_name=collection, query_vector=q_vec.tolist(), limit=max(topk, 20), query_filter=filt)
+        if hybrid:
+            results = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk, pool=hybrid_pool)
+        else:
+            results = store.search_dense(q_vec, namespace=ns_final, topk=topk)
     except Exception as e:
         console.print(f"[red]Search failed[/red]: {e}")
         raise typer.Exit(code=1)
 
     out = []
-    # Honor config toggle for reranker if not explicitly requested
-    if not rerank:
-        try:
-            cfg_rk = load_config().get("retrieval", {}).get("reranker", {})
-            rerank = bool(cfg_rk.get("enabled", False))
-        except Exception:
-            pass
-
-    if hybrid:
-        # Build BM25 pool by scrolling a bounded set in the namespace
-        from qdrant_client.http.models import Filter as QFilter
-        try:
-            all_pts = []
-            next_offset = None
-            while len(all_pts) < hybrid_pool:
-                pts, next_offset = client.scroll(collection_name=collection, scroll_filter=filt, limit=min(256, hybrid_pool - len(all_pts)), offset=next_offset)
-                all_pts.extend(pts)
-                if next_offset is None:
-                    break
-        except Exception as e:
-            console.print(f"[yellow]BM25 pool build failed[/yellow]: {e}")
-            all_pts = []
-
-        texts = [(p, (p.payload or {}).get("text") or "") for p in all_pts]
-        bm = bm25_rank(q, [t for _, t in texts]) if texts else []
-
-        # Map dense result points into the pool indices by point id (not object identity)
-        pool_index = {str(p.id): i for i, (p, _t) in enumerate(texts)}
-        dense_pairs = []
-        for p in res:
-            i = pool_index.get(str(p.id))
-            if i is not None:
-                dense_pairs.append((i, float(p.score or 0.0)))
-
-        merged = hybrid_merge(dense_pairs, bm)
-        # Convert merged back to points
-        ranked = [texts[i][0] for i, _ in merged][:topk]
-    elif rerank:
+    # Optional reranking (kept as-is); apply on candidate texts
+    if rerank:
         try:
             from .rerank import rerank_pairs
             cfg_rk = load_config().get("retrieval", {}).get("reranker", {})
             model_name = cfg_rk.get("model", "BAAI/bge-reranker-large")
-            cand_texts = [(p, (p.payload or {}).get("text") or "") for p in res]
-            order = rerank_pairs(model_name, q, [t for _, t in cand_texts])
-            ranked = [cand_texts[i][0] for i, _ in order][:topk]
+            cand_texts = [r.text or "" for r in results]
+            order = rerank_pairs(model_name, q, cand_texts)
+            results = [results[i] for i, _ in order][:topk]
         except Exception as e:
             console.print(f"[yellow]Rerank failed[/yellow]: {e}")
-            ranked = res[:topk]
-    else:
-        ranked = res[:topk]
+            results = results[:topk]
 
-    for p in ranked:
-        pl = p.payload or {}
+    for r in results[:topk]:
         out.append({
-            "id": p.id,
-            "score": float(p.score or 0.0),
-            "source": pl.get("source"),
-            "namespace": pl.get("namespace"),
-            "snippet": (pl.get("text") or "")[:240],
+            "id": r.id,
+            "score": float(r.score or 0.0),
+            "source": r.uri,
+            "namespace": r.namespace,
+            "snippet": (r.text or "")[:240],
         })
     typer.echo(json.dumps({"mode": "vector", "query": q, "ns": ns_final, "topk": topk, "results": out}, ensure_ascii=False, indent=2))
 
@@ -550,26 +591,34 @@ def crud(
     severity: int = typer.Option(0, "--severity"),
     force: bool = typer.Option(False, "--force", help="Override policy guard where applicable"),
 ):
-    cfg = load_config()
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    collection = qdrant_cfg.get("collection", "qq_data")
-    api_key = qdrant_cfg.get("api_key")
-    client = vs_connect(qdrant_url, api_key)
+    store = _get_store()
     ns_final = ns or infer_namespace()
 
     if delete:
         if not ids:
             console.print("--ids required for --delete")
             raise typer.Exit(code=2)
-        id_list = [i.strip() for i in ids.split(",") if i.strip()]
-        out = kb_delete(client, collection, id_list)
-        typer.echo(json.dumps({"deleted": out}))
+        try:
+            id_list = [int(i.strip()) for i in ids.split(",") if i.strip()]
+        except ValueError:
+            console.print("ids must be integers for SQLite store")
+            raise typer.Exit(code=2)
+        deleted = store.delete_ids(id_list)
+        typer.echo(json.dumps({"deleted": deleted}))
         return
 
     if search:
-        res = kb_search(client, collection, ns_final, search, topk=10)
-        typer.echo(json.dumps(res, ensure_ascii=False, indent=2))
+        try:
+            q_vec = embed_texts([search])[0]
+            res = store.search_hybrid(q_vec, search, namespace=ns_final, topk=10)
+            payload = [
+                {"id": r.id, "score": r.score, "text": r.text, "source": r.uri}
+                for r in res
+            ]
+        except Exception as e:
+            console.print(f"[red]Search failed[/red]: {e}")
+            raise typer.Exit(code=1)
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
     if insert_text:
@@ -581,8 +630,25 @@ def crud(
             "text": insert_text,
             "source": "crud:insert",
         }
-        pid = kb_insert(client, collection, payload, interactive=_interactive_from_ctx(ctx), force=force)
-        typer.echo(json.dumps({"inserted": pid}))
+        from .policy import guard_write
+        ok, err = guard_write(payload, _interactive_from_ctx(ctx), force)
+        if not ok:
+            console.print(err)
+            raise typer.Exit(code=3)
+        v = embed_texts([insert_text])[0]
+        doc_id = store.upsert_chunk(
+            uri="crud:insert",
+            namespace=ns_final,
+            text=insert_text,
+            vector=v,
+            title=None,
+            meta={"type": type_, "importance": importance, "severity": severity},
+            hash_=None,
+            simhash=None,
+            created_at=now_ist().isoformat(),
+            updated_at=now_ist().isoformat(),
+        )
+        typer.echo(json.dumps({"inserted": doc_id}))
         return
 
     console.print("Specify one of: --delete, --search, --insert-text")
@@ -591,22 +657,20 @@ def crud(
 @app.command()
 def export(ns: Optional[str] = typer.Option(None, "--ns")):
     """Export namespace as JSONL to stdout."""
-    cfg = load_config()
-    qdrant_cfg = cfg.get("vector_store", {})
-    qdrant_url = qdrant_cfg.get("url", "http://localhost:6333")
-    collection = qdrant_cfg.get("collection", "qq_data")
-    api_key = qdrant_cfg.get("api_key")
-    client = vs_connect(qdrant_url, api_key)
+    store = _get_store()
     ns_final = ns or infer_namespace()
-    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
-    filt = Filter(must=[FieldCondition(key="namespace", match=MatchValue(value=ns_final))])
-    next_offset = None
-    while True:
-        pts, next_offset = client.scroll(collection_name=collection, scroll_filter=filt, limit=256, offset=next_offset)
-        for p in pts:
-            typer.echo(json.dumps({"id": p.id, "payload": p.payload}, ensure_ascii=False))
-        if next_offset is None:
-            break
+    rows = store.list_namespace(ns_final, limit=100000)
+    for r in rows:
+        payload = {
+            "uri": r["uri"],
+            "namespace": r["namespace"],
+            "title": r["title"],
+            "meta": json.loads(r["meta"] or "{}"),
+            "text": r["text"],
+            "hash": r["hash"],
+            "simhash": r["simhash"],
+        }
+        typer.echo(json.dumps({"id": int(r["id"]), "payload": payload}, ensure_ascii=False))
 
 
 @app.command()
