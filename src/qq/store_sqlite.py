@@ -67,11 +67,13 @@ class SqliteVecStore:
     # --- Schema / lifecycle ---
     def ensure_schema(self, dim: int) -> None:
         self.load_vec0()
+        # Create or migrate docs table to allow non-unique URIs (multiple chunks per source)
+        # 1) Create table if missing (uri is NOT UNIQUE)
         self.exec(
             """
             CREATE TABLE IF NOT EXISTS docs (
               id INTEGER PRIMARY KEY,
-              uri TEXT UNIQUE,
+              uri TEXT,
               namespace TEXT,
               title TEXT,
               meta TEXT,
@@ -83,6 +85,45 @@ class SqliteVecStore:
             );
             """
         )
+        # 2) If existing table had UNIQUE(uri), migrate to non-unique
+        try:
+            row = self.exec(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='docs'"
+            ).fetchone()
+            ddl = (row[0] or "") if row else ""
+            if "uri TEXT UNIQUE" in ddl:
+                # Perform table rebuild migration
+                self.exec("BEGIN")
+                self.exec("ALTER TABLE docs RENAME TO docs_old")
+                self.exec(
+                    """
+                    CREATE TABLE docs (
+                      id INTEGER PRIMARY KEY,
+                      uri TEXT,
+                      namespace TEXT,
+                      title TEXT,
+                      meta TEXT,
+                      text TEXT,
+                      hash TEXT,
+                      simhash INTEGER,
+                      created_at TEXT,
+                      updated_at TEXT
+                    );
+                    """
+                )
+                # Recreate data preserving ids
+                self.exec(
+                    "INSERT INTO docs(id, uri, namespace, title, meta, text, hash, simhash, created_at, updated_at)\n                     SELECT id, uri, namespace, title, meta, text, hash, simhash, created_at, updated_at FROM docs_old"
+                )
+                # Drop old table
+                self.exec("DROP TABLE docs_old")
+                self.exec("COMMIT")
+        except Exception:
+            # If migration fails, try to ROLLBACK and continue; downstream ops may still work
+            try:
+                self.exec("ROLLBACK")
+            except Exception:
+                pass
         # FTS table with explicit rowid mapping; we will manage it manually on upserts/deletes
         self.exec(
             """
@@ -97,9 +138,15 @@ class SqliteVecStore:
             USING vec0(embedding float[{dim}]);
             """
         )
-        self.exec(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_uri ON docs(uri)"
-        )
+        # Ensure a non-unique index on uri exists (replace legacy unique index if needed)
+        try:
+            idx_list = self.exec("PRAGMA index_list('docs')").fetchall()
+            needs_drop = any((r[1] == 'idx_docs_uri' and int(r[2]) == 1) for r in idx_list)  # unique==1
+            if needs_drop:
+                self.exec("DROP INDEX IF EXISTS idx_docs_uri")
+        except Exception:
+            pass
+        self.exec("CREATE INDEX IF NOT EXISTS idx_docs_uri ON docs(uri)")
         self.exec(
             "CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)"
         )
