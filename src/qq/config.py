@@ -58,11 +58,38 @@ def default_config() -> Dict[str, Any]:
 
 
 def load_config() -> Dict[str, Any]:
+    """Load config with gentle migration for older versions.
+
+    - If file doesn't exist, return defaults (caller may persist).
+    - If existing config lacks `database.path`, add it with a sensible default.
+    - Preserve any legacy keys (e.g., `vector_store`) without removing them.
+    - Persist back to disk when a migration was applied.
+    """
+    ensure_dirs()
+    changed = False
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return data
-    return default_config()
+            data: Dict[str, Any] = yaml.safe_load(f) or {}
+    else:
+        data = default_config()
+        changed = True
+
+    # Add missing top-level sections/keys from defaults without overwriting user values
+    defaults = default_config()
+    for key, val in defaults.items():
+        if key not in data:
+            data[key] = val
+            changed = True
+
+    # Specific migration: ensure database.path exists
+    db = data.get("database")
+    if not isinstance(db, dict) or not db.get("path"):
+        data["database"] = {"path": str(DEFAULT_HOME / "qq.db")}
+        changed = True
+
+    if changed:
+        save_config(data)
+    return data
 
 
 def save_config(cfg: Dict[str, Any]) -> None:

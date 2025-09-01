@@ -414,10 +414,13 @@ def ingest(
 
         decision = "insert"
         if found:
-            # check exact dup
-            payload0 = found[0].payload or {}
-            existing_hash = payload0.get("hash")
-            existing_sim = int(payload0.get("simhash", 0) or 0)
+            # check exact dup using stored columns (SQLite rows)
+            row0 = found[0]
+            existing_hash = row0["hash"] if "hash" in row0.keys() else None
+            try:
+                existing_sim = int(row0["simhash"]) if row0["simhash"] is not None else 0
+            except Exception:
+                existing_sim = 0
             if existing_hash == doc_hash:
                 msg = f"{QQErrorCodes.ERR_DUPLICATE_DOC}: {fpath}"
                 if interactive:
