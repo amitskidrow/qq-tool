@@ -56,6 +56,40 @@ class TypesenseStore:
         )
         self.flat_search_cutoff = int(max(0, flat_search_cutoff))
 
+    def _multi_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a search via POST /multi_search to avoid URL length limits.
+
+        Returns the inner single-search result object (with keys like 'hits').
+        """
+        payload = {
+            "searches": [
+                {
+                    "collection": TYPESENSE_COLLECTION,
+                    **params,
+                }
+            ]
+        }
+        # Prefer using the Typesense client if it exposes multi_search
+        try:
+            ms = getattr(self.client, "multi_search", None)
+            if ms and hasattr(ms, "perform"):
+                res = ms.perform(payload)
+            else:
+                raise AttributeError("multi_search.perform not available")
+        except Exception:
+            # Fallback to direct HTTP call if client-side helper is unavailable
+            url = f"{TYPESENSE_PROTOCOL}://{TYPESENSE_HOST}:{TYPESENSE_PORT}/multi_search"
+            headers = {
+                "X-TYPESENSE-API-KEY": TYPESENSE_API_KEY,
+                "Content-Type": "application/json",
+            }
+            r = httpx.post(url, json=payload, headers=headers, timeout=5.0)
+            r.raise_for_status()
+            res = r.json()
+
+        results = res.get("results", []) if isinstance(res, dict) else []
+        return results[0] if results else {"hits": []}
+
     # --- Schema / bootstrap ---
     def ensure_schema(self, dim: int) -> None:
         try:
@@ -192,7 +226,8 @@ class TypesenseStore:
         # Use exhaustive search for tiny corpora
         if self._exhaustive():
             params["exhaustive_search"] = True
-        res = self._coll().documents.search(params)
+        # Use POST multi_search to avoid URL size limits when vectors are present
+        res = self._multi_search(params)
         return self._parse_hits(res)
 
     def search_hybrid(
@@ -215,7 +250,8 @@ class TypesenseStore:
             params["filter_by"] = f"namespace:={namespace}"
         if self._exhaustive():
             params["exhaustive_search"] = True
-        res = self._coll().documents.search(params)
+        # Use POST multi_search to avoid URL size limits when vectors are present
+        res = self._multi_search(params)
         return self._parse_hits(res)
 
     def _parse_hits(self, res: Dict[str, Any]) -> List[SearchResult]:
