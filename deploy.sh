@@ -53,7 +53,10 @@ commit_and_push() {
   else
     echo "No changes to commit"
   fi
-  git -C "$ROOT_DIR" push origin main || true
+  # Push current branch (works for feature branches and main)
+  local branch
+  branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  git -C "$ROOT_DIR" push -u origin "$branch" || true
 }
 
 # Convert origin URL to a PEP 508 VCS spec suitable for uvx/pipx
@@ -63,6 +66,8 @@ origin_spec() {
   if [[ -z "$origin" ]]; then
     echo ""; return 0
   fi
+  local branch
+  branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
   local https
   if [[ "$origin" =~ ^git@github.com:(.*)\.git$ ]]; then
     https="https://github.com/${BASH_REMATCH[1]}.git"
@@ -74,9 +79,9 @@ origin_spec() {
   if [[ "$https" != git+* ]]; then
     https="git+${https}"
   fi
-  # default to @main ref
+  # default to @<current-branch> ref
   if [[ "$https" != *"@"* ]]; then
-    https="${https}@main"
+    https="${https}@${branch}"
   fi
   echo "$https"
 }
@@ -151,7 +156,14 @@ install_remote() {
 }
 
 main() {
-  bump_version
+  # Allow skipping the bump via env: BUMP=0 ./deploy.sh
+  local do_bump
+  do_bump=${BUMP:-1}
+  if [[ "$do_bump" == "1" || "$do_bump" == "true" ]]; then
+    bump_version
+  else
+    echo "Skipping version bump (BUMP=$do_bump)"
+  fi
   commit_and_push
   install_remote
 }
