@@ -146,7 +146,8 @@ class TypesenseStore:
             for h in hits:
                 doc = h.get("document", {})
                 out.append(doc)
-            if page >= int(res.get("out_of", 0)):
+            # Stop when fewer than requested were returned (no more pages)
+            if not hits or len(hits) < 250:
                 break
             page += 1
         return out
@@ -221,7 +222,29 @@ class TypesenseStore:
         out: List[SearchResult] = []
         for h in res.get("hits", []):
             doc = h.get("document", {})
-            score = float(h.get("hybrid_search_info", {}).get("combined_scores", [h.get("text_match", 0.0)])[0] if isinstance(h.get("hybrid_search_info", {}).get("combined_scores"), list) else h.get("text_match", 0.0))
+            # Prefer hybrid combined score when present; otherwise derive from vector distance if available;
+            # finally fall back to text_match.
+            score: float
+            hy = h.get("hybrid_search_info", {}) if isinstance(h, dict) else {}
+            comb = hy.get("combined_scores")
+            if isinstance(comb, list) and comb:
+                try:
+                    score = float(comb[0])
+                except Exception:
+                    score = 0.0
+            elif "vector_distance" in h:
+                try:
+                    vd = float(h.get("vector_distance") or 0.0)
+                    # Convert smaller-is-better distance to larger-is-better similarity
+                    score = 1.0 - vd
+                except Exception:
+                    score = 0.0
+            else:
+                try:
+                    score = float(h.get("text_match") or 0.0)
+                except Exception:
+                    score = 0.0
+
             out.append(
                 SearchResult(
                     id=str(doc.get("id")),
@@ -269,4 +292,3 @@ class TypesenseStore:
             check("dimension_set", False, None)
 
         return out
-

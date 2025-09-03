@@ -8,7 +8,7 @@
 ## Build, Test, and Development Commands
 - Install (editable): `pip install -e .` (Python ≥3.10). Alternative: `uv pip install -e .`.
 - Install (tool): `uvx install --from . qq` or `pipx install .`.
-- Quickstart: `qq setup` (writes config, initializes SQLite store and checks keys), `qq doctor` (re-checks), `qq serve --reload` (FastAPI on 127.0.0.1:8787).
+- Quickstart: `qq setup` (writes config, ensures Typesense collection and checks keys), `qq doctor` (re-checks), `qq serve --reload` (FastAPI on 127.0.0.1:8787).
 - Retrieval: `qq ingest path/to/docs/` then `qq query "your question"`.
 - Release helper: `./deploy.sh` bumps patch in `pyproject.toml` and pushes.
 
@@ -20,7 +20,7 @@
 
 ## Testing Guidelines
 - Framework: prefer `pytest`. Place tests under `tests/` mirroring `src/qq/` (e.g., `tests/test_cli.py`).
-- Conventions: name files `test_*.py`; use fixtures; avoid network calls (mock LLM clients). No external DB is required for tests; the SQLite store uses a temp file via `QQ_HOME`.
+- Conventions: name files `test_*.py`; use fixtures; avoid network calls (mock LLM clients). Retrieval uses a local Typesense instance; for tests, prefer mocking the store or spinning up Typesense via the provided docker-compose.
 - Run (if configured): `pytest -q`; add coverage with `pytest --cov=qq`.
 
 ## Commit & Pull Request Guidelines
