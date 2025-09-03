@@ -250,13 +250,14 @@ class SqliteVecStore:
                 """
                 SELECT d.id, d.uri, d.namespace, d.title, d.meta, d.text, 1.0 - v.distance AS sim
                 FROM vec_index v JOIN docs d ON d.id = v.rowid
-                WHERE d.namespace = ? AND v.embedding MATCH ?
+                WHERE d.namespace = ? AND v.embedding MATCH ? AND v.k = ?
                 ORDER BY v.distance
                 LIMIT ?
                 """,
                 (
                     namespace,
                     json.dumps(query_vec.tolist()),
+                    int(max(1, topk)),
                     int(max(1, topk)),
                 ),
             ).fetchall()
@@ -265,12 +266,13 @@ class SqliteVecStore:
                 """
                 SELECT d.id, d.uri, d.namespace, d.title, d.meta, d.text, 1.0 - v.distance AS sim
                 FROM vec_index v JOIN docs d ON d.id = v.rowid
-                WHERE v.embedding MATCH ?
+                WHERE v.embedding MATCH ? AND v.k = ?
                 ORDER BY v.distance
                 LIMIT ?
                 """,
                 (
                     json.dumps(query_vec.tolist()),
+                    int(max(1, topk)),
                     int(max(1, topk)),
                 ),
             ).fetchall()
@@ -304,12 +306,13 @@ class SqliteVecStore:
                 """
                 SELECT d.id, 1.0 - v.distance AS sim
                 FROM vec_index v JOIN docs d ON d.id=v.rowid
-                WHERE d.namespace=? AND v.embedding MATCH ?
+                WHERE d.namespace=? AND v.embedding MATCH ? AND v.k = ?
                 ORDER BY v.distance LIMIT ?
                 """,
                 (
                     namespace,
                     json.dumps(query_vec.tolist()),
+                    int(max(topk * 2, 20)),
                     int(max(topk * 2, 20)),
                 ),
             ).fetchall()
@@ -318,11 +321,12 @@ class SqliteVecStore:
                 """
                 SELECT d.id, 1.0 - v.distance AS sim
                 FROM vec_index v JOIN docs d ON d.id=v.rowid
-                WHERE v.embedding MATCH ?
+                WHERE v.embedding MATCH ? AND v.k = ?
                 ORDER BY v.distance LIMIT ?
                 """,
                 (
                     json.dumps(query_vec.tolist()),
+                    int(max(topk * 2, 20)),
                     int(max(topk * 2, 20)),
                 ),
             ).fetchall()
