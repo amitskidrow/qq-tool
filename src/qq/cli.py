@@ -15,7 +15,7 @@ from . import __version__
 from .api import build_app
 from .config import CONFIG_PATH, ensure_dirs, load_config, save_config
 from .errors import QQErrorCodes
-from .store_sqlite import SqliteVecStore
+from .store_typesense import TypesenseStore
 from .util import infer_namespace, is_supported_file, read_text_file, now_ist
 from .hashing import content_hash
 from .simhash import simhash_text64, hamming64
@@ -26,9 +26,10 @@ from .audit import append_audit
 from .sessions import create_session, load_session, save_session, list_sessions, close_session
 from .usage import add_usage, get_usage, remaining
 from .orchestrator import answer as orchestrated_answer
+from .compression import compress_texts
 from .tokens import rough_token_count
 from .todos import load_todos, add_todo, resolve_todo
-# Qdrant-based CRUD removed; SQLite store handles CRUD directly
+# Typesense store handles CRUD directly
 
 
 console = Console(stderr=True)
@@ -52,7 +53,7 @@ def _echo_if_interactive(interactive: bool, msg: str) -> None:
 
 # --- int64 helpers for simhash storage ---
 def _to_i64(n: int) -> int:
-    """Convert unsigned 64-bit to signed 64-bit range for SQLite INTEGER."""
+    """Convert unsigned 64-bit to signed 64-bit range."""
     n64 = n & ((1 << 64) - 1)
     return n64 - (1 << 64) if n64 >= (1 << 63) else n64
 
@@ -84,53 +85,21 @@ def _version_cmd():
     typer.echo(__version__)
 
 
-def _get_store() -> SqliteVecStore:
-    cfg = load_config()
-    db_path = cfg.get("database", {}).get("path")
-    if not db_path:
-        raise RuntimeError("database.path not configured. Run 'qq config reset' to regenerate config.")
-    return SqliteVecStore(Path(db_path))
+def _get_store() -> TypesenseStore:
+    return TypesenseStore()
 
 
-def _db_ready() -> bool:
+def _ts_ready() -> bool:
     try:
         store = _get_store()
-        # Ensure schema exists with current embedding dimension if missing
-        dim = store.get_dim()
-        if dim is None:
-            from .embeddings import embedding_dim
-            store.ensure_schema(embedding_dim())
-        else:
-            # verify vec0 loads
-            store.load_vec0()
+        from .embeddings import embedding_dim
+        store.ensure_schema(embedding_dim())
         return True
     except Exception:
         return False
 
 
-@app.command()
-def db_init():
-    """Initialize the SQLite database and store embedding dimension."""
-    try:
-        store = _get_store()
-        from .embeddings import embedding_dim
-        store.ensure_schema(embedding_dim())
-        typer.echo(json.dumps({"ok": True, "path": str(store.db_path), "dim": store.get_dim()}))
-    except Exception as e:
-        console.print(f"[red]db.init failed[/red]: {e}")
-        raise typer.Exit(code=1)
-
-
-@app.command()
-def rebuild_fts():
-    """Rebuild the FTS index from docs."""
-    try:
-        store = _get_store()
-        n = store.rebuild_fts()
-        typer.echo(json.dumps({"rebuilt": n}))
-    except Exception as e:
-        console.print(f"[red]rebuild-fts failed[/red]: {e}")
-        raise typer.Exit(code=1)
+    
 
 
     
@@ -144,15 +113,15 @@ def setup(ctx: typer.Context):
     if not CONFIG_PATH.exists():
         save_config(cfg)
 
-    # Prepare SQLite store
+    # Prepare Typesense collection
     try:
         store = _get_store()
         from .embeddings import embedding_dim
         store.ensure_schema(embedding_dim())
-        _echo_if_interactive(_interactive_from_ctx(ctx), f"SQLite store ready at {store.db_path}")
+        _echo_if_interactive(_interactive_from_ctx(ctx), "Typesense collection ready")
     except Exception as e:
         console.print(
-            f"[yellow]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/yellow]: SQLite not ready ({e})",
+            f"[yellow]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/yellow]: Typesense not ready ({e})",
             highlight=False,
         )
 
@@ -173,12 +142,12 @@ def doctor():
     cfg = load_config()
     hard_fail = False
 
-    # DB
+    # Typesense
     try:
         store = _get_store()
         rep = store.doctor()
         if not rep.get("ok"):
-            console.print(f"[red]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/red]: SQLite issues")
+            console.print(f"[red]{QQErrorCodes.ERR_VECTOR_UNAVAILABLE}[/red]: Typesense issues")
             for c in rep.get("checks", []):
                 if not c.get("ok"):
                     console.print(f" - {c.get('name')}: {c.get('detail')}")
@@ -369,15 +338,10 @@ def ingest(
 
         decision = "insert"
         if found:
-            # check exact dup using stored columns (SQLite rows)
-            row0 = found[0]
-            existing_hash = row0["hash"] if "hash" in row0.keys() else None
-            try:
-                raw_sim = int(row0["simhash"]) if row0["simhash"] is not None else 0
-                existing_sim = _to_u64(raw_sim)
-            except Exception:
-                existing_sim = 0
-            if existing_hash == doc_hash:
+            # If exact text match exists for any chunk, consider duplicate
+            existing_text = "\n".join([str(r.get("text") or "") for r in found])
+            existing_sim = _to_u64(simhash_text64(existing_text)) if existing_text else 0
+            if content_hash(existing_text) == doc_hash:
                 msg = f"{QQErrorCodes.ERR_DUPLICATE_DOC}: {fpath}"
                 if interactive:
                     console.print(f"[yellow]{msg}[/yellow] -> skip")
@@ -386,11 +350,9 @@ def ingest(
                     console.print(f"[yellow]{msg}[/yellow]")
                     continue
             else:
-                # near-dup?
                 ham = hamming64(existing_sim, doc_sim) if existing_sim else 64
                 if ham <= 3 and not allow_replace:
                     if interactive:
-                        # prompt
                         choice = typer.prompt(f"Near-duplicate for {fpath}. replace [y/N]?", default="n")
                         if choice.lower().startswith("y"):
                             decision = "replace"
@@ -415,7 +377,7 @@ def ingest(
         # delete old entries if replacing
         if decision == "replace" and found:
             try:
-                store.delete_ids([int(r["id"]) for r in found])
+                store.delete_ids([str(r.get("id")) for r in found if r.get("id")])
             except Exception:
                 pass
 
@@ -426,23 +388,13 @@ def ingest(
         # upsert
         try:
             n_chunks = 0
-            meta_base = {
-                "type": "general_info",
-                "importance": 1,
-                "severity": 0,
-                "priority": 0,
-                "freshness_ts": int(now_ist().timestamp()),
-                "doc_hash": doc_hash,
-            }
             for i, (ch, v) in enumerate(zip(chunks, vecs)):
-                meta = {**meta_base, "chunk_idx": i}
                 store.upsert_chunk(
                     uri=str(fpath),
                     namespace=ns_final,
                     text=ch,
                     vector=v,
                     title=fpath.name,
-                    meta=meta,
                     hash_=doc_hash,
                     simhash=_to_i64(doc_sim),
                     created_at=now_ist().isoformat(),
@@ -472,8 +424,11 @@ def query(
     ns: Optional[str] = typer.Option(None, "--ns"),
     topk: int = typer.Option(5, "--topk"),
     rerank: bool = typer.Option(False, "--rerank", help="Enable cross-encoder reranking of results"),
-    hybrid: bool = typer.Option(False, "--hybrid", help="Combine dense vector and BM25 scores"),
-    hybrid_pool: int = typer.Option(200, "--hybrid-pool", help="Max docs to consider for BM25 within namespace"),
+    hybrid: bool = typer.Option(False, "--hybrid", help="Combine keyword + dense via Typesense"),
+    alpha: float = typer.Option(0.55, "--alpha", help="Hybrid fusion alpha (0..1)"),
+    flat: int = typer.Option(20, "--flat", help="Exact scan cutoff (docs <= cutoff)"),
+    compress: Optional[int] = typer.Option(None, "--compress", help="Percent to keep (1-99)"),
+    max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="Absolute token budget"),
 ):
     """Vector mode: return top-N chunks with citations & metadata."""
     store = _get_store()
@@ -488,9 +443,11 @@ def query(
     # Filter by ns if provided/inferred
     ns_final = ns or infer_namespace()
 
+    # tune exact scan cutoff
     try:
+        store.flat_search_cutoff = int(max(0, flat))
         if hybrid:
-            results = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk, pool=hybrid_pool)
+            results = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk, alpha=alpha)
         else:
             results = store.search_dense(q_vec, namespace=ns_final, topk=topk)
     except Exception as e:
@@ -511,15 +468,30 @@ def query(
             console.print(f"[yellow]Rerank failed[/yellow]: {e}")
             results = results[:topk]
 
-    for r in results[:topk]:
+    texts = [r.text or "" for r in results[:topk]]
+    compressed = False
+    ratio_applied = 1.0
+    if compress is not None or max_tokens is not None:
+        compressed = True
+        if compress is not None:
+            ratio = max(1, min(99, int(compress))) / 100.0
+            texts, ratio_applied = compress_texts(texts, ratio=ratio)
+        else:
+            texts, ratio_applied = compress_texts(texts, max_tokens=max_tokens)
+
+    for (r, t) in zip(results[:topk], texts):
         out.append({
             "id": r.id,
             "score": float(r.score or 0.0),
             "source": r.uri,
             "namespace": r.namespace,
-            "snippet": (r.text or "")[:240],
+            "snippet": (t or "")[:240],
         })
-    typer.echo(json.dumps({"mode": "vector", "query": q, "ns": ns_final, "topk": topk, "results": out}, ensure_ascii=False, indent=2))
+    payload = {"mode": "vector", "query": q, "ns": ns_final, "topk": topk, "results": out}
+    if compressed:
+        payload["compressed"] = True
+        payload["compression_ratio"] = ratio_applied
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @app.command()
@@ -557,11 +529,7 @@ def crud(
         if not ids:
             console.print("--ids required for --delete")
             raise typer.Exit(code=2)
-        try:
-            id_list = [int(i.strip()) for i in ids.split(",") if i.strip()]
-        except ValueError:
-            console.print("ids must be integers for SQLite store")
-            raise typer.Exit(code=2)
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
         deleted = store.delete_ids(id_list)
         typer.echo(json.dumps({"deleted": deleted}))
         return
@@ -601,7 +569,6 @@ def crud(
             text=insert_text,
             vector=v,
             title=None,
-            meta={"type": type_, "importance": importance, "severity": severity},
             hash_=None,
             simhash=None,
             created_at=now_ist().isoformat(),
@@ -621,21 +588,63 @@ def export(ns: Optional[str] = typer.Option(None, "--ns")):
     rows = store.list_namespace(ns_final, limit=100000)
     for r in rows:
         payload = {
-            "uri": r["uri"],
-            "namespace": r["namespace"],
-            "title": r["title"],
-            "meta": json.loads(r["meta"] or "{}"),
-            "text": r["text"],
-            "hash": r["hash"],
-            "simhash": int(r["simhash"]) & ((1 << 64) - 1) if r["simhash"] is not None else None,
+            "uri": r.get("source"),
+            "namespace": r.get("namespace"),
+            "text": r.get("text"),
         }
-        typer.echo(json.dumps({"id": int(r["id"]), "payload": payload}, ensure_ascii=False))
+        typer.echo(json.dumps({"id": r.get("id"), "payload": payload}, ensure_ascii=False))
 
 
 @app.command()
 def reindex():
     """Placeholder: would rebuild embeddings/indexes if needed."""
     typer.echo("ok")
+
+
+@app.command()
+def bench(
+    q: str = typer.Argument("test query", help="Query to use for benchmarking"),
+    ns: Optional[str] = typer.Option(None, "--ns"),
+    iters: int = typer.Option(50, "--iters"),
+    warm: int = typer.Option(5, "--warm"),
+    topk: int = typer.Option(5, "--topk"),
+    hybrid: bool = typer.Option(False, "--hybrid"),
+    alpha: float = typer.Option(0.55, "--alpha"),
+):
+    """Benchmark end-to-end query latency (embed + search)."""
+    import statistics
+    import time
+
+    store = _get_store()
+    ns_final = ns or infer_namespace()
+
+    # Warm embedder
+    embed_texts([q])
+
+    # Warm a few times
+    for _ in range(max(0, warm)):
+        q_vec = embed_texts([q])[0]
+        if hybrid:
+            _ = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk, alpha=alpha)
+        else:
+            _ = store.search_dense(q_vec, namespace=ns_final, topk=topk)
+
+    # Timed runs
+    times_ms: List[float] = []
+    for _ in range(max(1, iters)):
+        t0 = time.perf_counter()
+        q_vec = embed_texts([q])[0]
+        if hybrid:
+            _ = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk, alpha=alpha)
+        else:
+            _ = store.search_dense(q_vec, namespace=ns_final, topk=topk)
+        t1 = time.perf_counter()
+        times_ms.append((t1 - t0) * 1000.0)
+
+    p50 = statistics.median(times_ms)
+    p95 = statistics.quantiles(times_ms, n=20)[18] if len(times_ms) >= 20 else max(times_ms)
+    payload = {"iters": iters, "p50_ms": round(p50, 2), "p95_ms": round(p95, 2), "min_ms": round(min(times_ms), 2), "max_ms": round(max(times_ms), 2)}
+    typer.echo(json.dumps(payload))
 
 
 @app.command()

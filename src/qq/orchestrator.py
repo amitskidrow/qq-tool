@@ -7,10 +7,10 @@ from .config import load_config
 from .answer_contract import ANSWER_CONTRACT_SYSTEM, build_user_prompt
 from .embeddings import embed_texts
 from .util import infer_namespace
-from .store_sqlite import SqliteVecStore
+from .store_typesense import TypesenseStore
 
 
-def vector_retrieve(store: SqliteVecStore, q: str, ns: str, topk: int = 8):
+def vector_retrieve(store: TypesenseStore, q: str, ns: str, topk: int = 8):
     q_vec = embed_texts([q])[0]
     res = store.search_dense(q_vec, namespace=ns, topk=topk)
     contexts = []
@@ -24,7 +24,7 @@ def vector_retrieve(store: SqliteVecStore, q: str, ns: str, topk: int = 8):
     return contexts
 
 
-def answer(store: SqliteVecStore, provider: str, model: str, question: str, ns: str | None = None) -> Dict:
+def answer(store: TypesenseStore, provider: str, model: str, question: str, ns: str | None = None) -> Dict:
     cfg = load_config()
     ns = ns or infer_namespace()
     ctx = vector_retrieve(store, question, ns, topk=10)

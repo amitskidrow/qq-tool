@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Source: `src/qq` (CLI in `cli.py`, API in `api.py`, retrieval in `store_sqlite.py`, models in `models/`).
+- Source: `src/qq` (CLI in `cli.py`, API in `api.py`, retrieval in `store_typesense.py`, models in `models/`).
 - Config/state: `$HOME/.qq/` (overridable via `QQ_HOME`). Files include `config.yaml`, `sessions/`, `usage/`, `audit/`, `todos/`.
 - Packaging: `pyproject.toml` (hatchling). Entry point script: `qq` → `qq.entry:main`.
 

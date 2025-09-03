@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  typesense:
+    image: typesense/typesense:latest
+    container_name: qq-typesense
+    restart: unless-stopped
+    ports:
+      - "8108:8108"
+    volumes:
+      - ./ts-data:/data
+    command: [
+      "--data-dir", "/data",
+      "--api-key", "tsdev",
+      "--listen-port", "8108",
+      "--enable-cors"
+    ]
+    healthcheck:
+      test: ["CMD", "curl", "-sS", "-H", "X-TYPESENSE-API-KEY: tsdev", "http://localhost:8108/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+

@@ -40,10 +40,6 @@ def default_config() -> Dict[str, Any]:
             "timezone": "Asia/Kolkata",
             "ttl_hours": 24,
         },
-        "database": {
-            # Local SQLite database path for retrieval store
-            "path": str(DEFAULT_HOME / "qq.db"),
-        },
         "usage": {
             "mode": "daily",
             "timezone": "Asia/Kolkata",
@@ -61,7 +57,7 @@ def load_config() -> Dict[str, Any]:
     """Load config with gentle migration for older versions.
 
     - If file doesn't exist, return defaults (caller may persist).
-    - If existing config lacks `database.path`, add it with a sensible default.
+    - Preserve prior keys when present.
     - Preserve any legacy keys (e.g., `vector_store`) without removing them.
     - Persist back to disk when a migration was applied.
     """
@@ -80,12 +76,6 @@ def load_config() -> Dict[str, Any]:
         if key not in data:
             data[key] = val
             changed = True
-
-    # Specific migration: ensure database.path exists
-    db = data.get("database")
-    if not isinstance(db, dict) or not db.get("path"):
-        data["database"] = {"path": str(DEFAULT_HOME / "qq.db")}
-        changed = True
 
     if changed:
         save_config(data)

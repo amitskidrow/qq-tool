@@ -3,9 +3,8 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from .config import load_config
 from .embeddings import embed_texts
-from .store_sqlite import SqliteVecStore
+from .store_typesense import TypesenseStore
 from .util import infer_namespace
 
 
@@ -22,16 +21,15 @@ def build_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/query")
-    def api_query(q: str, ns: str | None = None, topk: int = 5):
-        cfg = load_config()
-        db_path = cfg.get("database", {}).get("path")
-        if not db_path:
-            raise HTTPException(status_code=500, detail="database.path not configured")
-        store = SqliteVecStore(db_path)
+    def api_query(q: str, ns: str | None = None, topk: int = 5, hybrid: bool = True):
+        store = TypesenseStore()
         try:
             q_vec = embed_texts([q])[0]
             ns_final = ns or infer_namespace()
-            results = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk)
+            if hybrid:
+                results = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk)
+            else:
+                results = store.search_dense(q_vec, namespace=ns_final, topk=topk)
             out = []
             for r in results:
                 out.append({
