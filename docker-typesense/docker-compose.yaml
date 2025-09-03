@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   typesense:
-    image: typesense/typesense:latest
+    image: typesense/typesense:0.25.2
     container_name: qq-typesense
     restart: unless-stopped
     ports:
@@ -21,4 +19,3 @@ services:
       timeout: 2s
       retries: 20
       start_period: 5s
-
