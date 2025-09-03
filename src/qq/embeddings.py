@@ -15,10 +15,18 @@ def _get_model():
         raise RuntimeError(
             "sentence-transformers is required for local embeddings."
         ) from e
-    # Allow overriding the embedding model for latency/quality tradeoffs
-    # Examples: "all-MiniLM-L6-v2" (~384d, very fast), "BAAI/bge-small-en-v1.5"
+    # Allow overriding the embedding model and device for latency/quality tradeoffs
+    # Examples: model: "all-MiniLM-L6-v2" (~384d, fast), "BAAI/bge-small-en-v1.5"; device: "cpu" | "cuda"
     model_name = os.getenv("QQ_EMBED_MODEL", "BAAI/bge-m3")
-    model = SentenceTransformer(model_name)
+    device = os.getenv("QQ_EMBED_DEVICE")
+    try:
+        if device:
+            model = SentenceTransformer(model_name, device=device)
+        else:
+            model = SentenceTransformer(model_name)
+    except Exception:
+        # Fallback to CPU if requested device isn't available
+        model = SentenceTransformer(model_name, device="cpu")
     return model
 
 

@@ -10,6 +10,7 @@ from typing import Optional
 import typer
 import uvicorn
 from rich.console import Console
+import httpx
 
 from . import __version__
 from .api import build_app
@@ -429,8 +430,39 @@ def query(
     flat: int = typer.Option(20, "--flat", help="Exact scan cutoff (docs <= cutoff)"),
     compress: Optional[int] = typer.Option(None, "--compress", help="Percent to keep (1-99)"),
     max_tokens: Optional[int] = typer.Option(None, "--max-tokens", help="Absolute token budget"),
+    remote: bool = typer.Option(False, "--remote", help="Use running API server for low latency"),
+    remote_url: Optional[str] = typer.Option(None, "--remote-url", help="Override API URL (default http://127.0.0.1:8787)"),
 ):
     """Vector mode: return top-N chunks with citations & metadata."""
+    # Remote fast-path: avoid per-invocation model load by using the API server
+    env_remote = os.getenv("QQ_REMOTE")
+    env_remote_url = os.getenv("QQ_REMOTE_URL")
+    if remote or (env_remote and env_remote.lower() in {"1", "true", "yes"}):
+        base = remote_url or env_remote_url or "http://127.0.0.1:8787"
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                r = client.get(f"{base}/query", params={
+                    "q": q,
+                    "ns": ns or infer_namespace(),
+                    "topk": topk,
+                    "hybrid": hybrid,
+                })
+                r.raise_for_status()
+                data = r.json()
+                out = data.get("results", [])
+                payload = {"mode": "vector", "query": q, "ns": data.get("ns"), "topk": topk, "results": out}
+                if compress is not None or max_tokens is not None:
+                    texts = [str(i.get("snippet") or "") for i in out]
+                    compressed_texts, ratio_applied = compress_texts(texts, ratio=(max(1, min(99, int(compress))) / 100.0) if compress is not None else None, max_tokens=max_tokens)
+                    for i, t in zip(out, compressed_texts):
+                        i["snippet"] = t[:240]
+                    payload["compressed"] = True
+                    payload["compression_ratio"] = ratio_applied
+                typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+                return
+        except Exception as e:
+            console.print(f"[yellow]Remote query failed[/yellow]: {e}. Falling back to local.")
+
     store = _get_store()
 
     # Embed query

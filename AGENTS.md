@@ -9,6 +9,7 @@
 - Install (editable): `pip install -e .` (Python ≥3.10). Alternative: `uv pip install -e .`.
 - Install (tool): `uvx install --from . qq` or `pipx install .`.
 - Quickstart: `qq setup` (writes config, ensures Typesense collection and checks keys), `qq doctor` (re-checks), `qq serve --reload` (FastAPI on 127.0.0.1:8787).
+- Low-latency: run API as a background service and use `qq query --remote` (or set `QQ_REMOTE=1`).
 - Retrieval: `qq ingest path/to/docs/` then `qq query "your question"`.
 - Release helper: `./deploy.sh` bumps patch in `pyproject.toml` and pushes.
 
@@ -29,4 +30,5 @@
 
 ## Security & Configuration Tips
 - Required services/keys: `OPENAI_API_KEY` and/or `GOOGLE_API_KEY`/`GEMINI_API_KEY` for models.
+- Performance env vars: `QQ_EMBED_MODEL` (e.g., `all-MiniLM-L6-v2`), `QQ_EMBED_DEVICE` (`cpu` | `cuda`), `QQ_REMOTE`, `QQ_REMOTE_URL`.
 - Do not commit credentials or `$HOME/.qq/` contents. Use `QQ_HOME` to point to a sandbox during tests.

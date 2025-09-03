@@ -1,0 +1,16 @@
+[Unit]
+Description=qq API server
+After=network.target
+
+[Service]
+Type=simple
+Environment=QQ_EMBED_MODEL=all-MiniLM-L6-v2
+# Set to cuda if you have a GPU and drivers installed; otherwise leave cpu
+# Environment=QQ_EMBED_DEVICE=cuda
+ExecStart=%h/.local/bin/qq serve --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+

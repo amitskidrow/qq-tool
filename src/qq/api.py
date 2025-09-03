@@ -11,6 +11,14 @@ from .util import infer_namespace
 def build_app() -> FastAPI:
     app = FastAPI(title="qq API", version="0.0.1")
 
+    # Warm the embedding model on startup to avoid first-request latency
+    @app.on_event("startup")
+    def _warmup():
+        try:
+            _ = embed_texts(["warmup"])  # loads model into memory
+        except Exception:
+            pass
+
     @app.get("/health")
     def health():
         return {"ok": True}
