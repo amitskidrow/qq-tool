@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import sqlite3
 import threading
 import time
@@ -17,7 +19,7 @@ except Exception as e:  # pragma: no cover
 from .qq_embeddings import OnnxEmbedder, get_embedder
 
 
-DEFAULT_DB_URI = "file:qqmem?mode=memory&cache=shared"
+DEFAULT_DB_URI = os.path.expanduser("~/.qq/global.db")
 
 
 @dataclass
@@ -53,24 +55,59 @@ class Engine:
         embedder: Optional[OnnxEmbedder] = None,
         dim: Optional[int] = None,
     ) -> None:
-        self.db_uri = db_uri
+        # Resolve DB location (global persistent by default)
+        self.db_uri = db_uri or DEFAULT_DB_URI
+        if not self.db_uri:
+            self.db_uri = DEFAULT_DB_URI
+        # Ensure parent directory exists for file-based DBs
+        try:
+            if not self.db_uri.startswith("file:"):
+                Path(self.db_uri).parent.mkdir(parents=True, exist_ok=True)
+            else:
+                # file: URI may contain absolute path after the scheme
+                p = self.db_uri.removeprefix("file:")
+                # Strip URI query string if present
+                p = p.split("?", 1)[0]
+                if p:
+                    Path(p).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Best-effort, continue if path cannot be created
+            pass
         self._embedder = embedder or get_embedder()
         self.dim = dim or self._embedder.dim
         self._lock = threading.RLock()
         self._conn = self._connect()
+        self.vec_enabled = False
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_uri, uri=True, check_same_thread=False)
+        is_uri = isinstance(self.db_uri, str) and self.db_uri.startswith("file:")
+        conn = sqlite3.connect(self.db_uri, uri=is_uri, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         # Enable extension loading and FTS5
         try:
+            # Required to allow loading loadable extensions like sqlite-vec
+            try:
+                conn.enable_load_extension(True)
+            except Exception:
+                pass
             if sqlite_vec is not None:
-                sqlite_vec.load(conn)
-        except Exception as e:  # pragma: no cover
-            raise RuntimeError(
-                "Failed to load sqlite-vec extension. Ensure 'sqlite-vec' is installed."
-            ) from e
+                try:
+                    sqlite_vec.load(conn)
+                    self.vec_enabled = True
+                except Exception:
+                    # Could not load vec extension; fall back to FTS-only
+                    self.vec_enabled = False
+        except Exception:
+            # Extension loading failed entirely; continue with FTS-only
+            self.vec_enabled = False
+
+        # Prefer WAL for durability/perf on file-backed DBs
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+        except Exception:
+            pass
         return conn
 
     def _init_db(self) -> None:
@@ -86,34 +123,48 @@ class Engine:
                 """
             )
             # FTS5 table for BM25; 'id' is stored but not indexed
+            # Use default tokenizer for maximum compatibility across builds
             self._conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
                   id UNINDEXED,
-                  text,
-                  tokenize = 'simple'
+                  text
                 )
                 """
             )
-            # Vector index using sqlite-vec
-            self._conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{self.dim}])"
-            )
+            # Vector index using sqlite-vec (optional)
+            if self.vec_enabled:
+                self._conn.execute(
+                    f"CREATE VIRTUAL TABLE IF NOT EXISTS vec USING vec0(embedding float[{self.dim}])"
+                )
 
     # ---------- helpers ----------
     def _pack(self, v: np.ndarray) -> memoryview:
         # Serialize a 1-D float32 vector for sqlite-vec
         if sqlite_vec is None:  # pragma: no cover
             raise RuntimeError("sqlite-vec Python package not available")
-        return sqlite_vec.serialize(v.astype(np.float32).tolist())  # type: ignore
+        vec = v.astype(np.float32)
+        # Support multiple sqlite-vec APIs across versions
+        if hasattr(sqlite_vec, "serialize"):
+            return sqlite_vec.serialize(vec.tolist())  # type: ignore
+        if hasattr(sqlite_vec, "serialize_float32"):
+            return sqlite_vec.serialize_float32(vec)  # type: ignore
+        if hasattr(sqlite_vec, "pack"):
+            # 'pack' may expect a Python list of floats
+            return sqlite_vec.pack(vec.tolist())  # type: ignore
+        # Fallback: raw bytes wrapped as memoryview
+        return memoryview(vec.tobytes())
 
     # ---------- public API ----------
     def upsert(self, id: str, text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         t0 = time.perf_counter()
-        # Embed
-        e0 = time.perf_counter()
-        vec = self._embedder.encode([text])[0]
-        e1 = time.perf_counter()
+        # Embed (only if vectors enabled)
+        vec = None
+        e0 = e1 = time.perf_counter()
+        if self.vec_enabled:
+            e0 = time.perf_counter()
+            vec = self._embedder.encode([text])[0]
+            e1 = time.perf_counter()
 
         with self._lock, self._conn:  # single transaction
             # docs
@@ -128,46 +179,48 @@ class Engine:
                 "INSERT INTO docs_fts(id, text) VALUES(?, ?)",
                 (id, text),
             )
-            # Vectors (rowid correlates to docs.id via a mapping table or direct use of rowid)
-            # For simplicity, use a separate mapping table to map ids to rowid
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS vec_map (
-                  id TEXT PRIMARY KEY,
-                  rid INTEGER UNIQUE
-                )
-                """
-            )
-            cur = self._conn.execute("SELECT rid FROM vec_map WHERE id = ?", (id,))
-            row = cur.fetchone()
-            if row is None:
-                # Insert new vector row
-                cur2 = self._conn.execute(
-                    "INSERT INTO vec(embedding) VALUES(?)",
-                    (self._pack(vec),),
-                )
-                rid = cur2.lastrowid
+            # Vectors (optional): maintain mapping only if vec is enabled
+            if self.vec_enabled and vec is not None:
                 self._conn.execute(
-                    "INSERT INTO vec_map(id, rid) VALUES(?, ?)", (id, rid)
+                    """
+                    CREATE TABLE IF NOT EXISTS vec_map (
+                      id TEXT PRIMARY KEY,
+                      rid INTEGER UNIQUE
+                    )
+                    """
                 )
-            else:
-                rid = int(row["rid"])
-                self._conn.execute(
-                    "UPDATE vec SET embedding=? WHERE rowid=?",
-                    (self._pack(vec), rid),
-                )
+                cur = self._conn.execute("SELECT rid FROM vec_map WHERE id = ?", (id,))
+                row = cur.fetchone()
+                if row is None:
+                    # Insert new vector row
+                    cur2 = self._conn.execute(
+                        "INSERT INTO vec(embedding) VALUES(?)",
+                        (self._pack(vec),),
+                    )
+                    rid = cur2.lastrowid
+                    self._conn.execute(
+                        "INSERT INTO vec_map(id, rid) VALUES(?, ?)", (id, rid)
+                    )
+                else:
+                    rid = int(row["rid"])
+                    self._conn.execute(
+                        "UPDATE vec SET embedding=? WHERE rowid=?",
+                        (self._pack(vec), rid),
+                    )
 
         total_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "ok": True,
             "timings": {
-                "embed_ms": (e1 - e0) * 1000.0,
+                "embed_ms": max((e1 - e0) * 1000.0, 0.0),
                 "total_ms": total_ms,
             },
         }
 
     def _search_vec(self, q_vec: np.ndarray, k: int) -> List[Tuple[str, float]]:
         # Returns list of (id, sim) where sim in [0,1], higher is better
+        if not self.vec_enabled:
+            return []
         if q_vec.ndim == 2:
             q_vec = q_vec[0]
         cur = self._conn.execute(
@@ -218,17 +271,21 @@ class Engine:
         rerank: bool = False,
     ) -> Tuple[List[SearchHit], Timings]:
         t0 = time.perf_counter()
-        # Embed
-        e0 = time.perf_counter()
-        q_vec = self._embedder.encode([q])
-        e1 = time.perf_counter()
+        # Embed only if vectors are enabled
+        e0 = e1 = time.perf_counter()
+        dense: List[Tuple[str, float]] = []
+        if self.vec_enabled:
+            e0 = time.perf_counter()
+            q_vec = self._embedder.encode([q])
+            e1 = time.perf_counter()
+            # Vector search
+            v0 = time.perf_counter()
+            dense = self._search_vec(q_vec, k)
+            v1 = time.perf_counter()
+        else:
+            v0 = v1 = time.perf_counter()
 
-        # Vector search
-        v0 = time.perf_counter()
-        dense = self._search_vec(q_vec, k)
-        v1 = time.perf_counter()
-
-        # FTS search
+        # FTS search (always available)
         f0 = time.perf_counter()
         sparse = self._search_fts(q, k)
         f1 = time.perf_counter()
@@ -236,10 +293,14 @@ class Engine:
         # Fuse
         fu0 = time.perf_counter()
         scores: Dict[str, float] = {}
-        for id_, s in dense:
-            scores[id_] = scores.get(id_, 0.0) + alpha * s
-        for id_, s in sparse:
-            scores[id_] = scores.get(id_, 0.0) + (1.0 - alpha) * s
+        if self.vec_enabled and dense:
+            for id_, s in dense:
+                scores[id_] = scores.get(id_, 0.0) + alpha * s
+        # If no vectors, rely solely on FTS scores
+        if sparse:
+            weight = (1.0 - alpha) if self.vec_enabled else 1.0
+            for id_, s in sparse:
+                scores[id_] = scores.get(id_, 0.0) + weight * s
         hits = [SearchHit(id=kid, score=sv) for kid, sv in scores.items()]
         hits.sort(key=lambda x: x.score, reverse=True)
         hits = hits[:k]
@@ -253,8 +314,8 @@ class Engine:
 
         t1 = time.perf_counter()
         timings = Timings(
-            embed_ms=(e1 - e0) * 1000.0,
-            vec_ms=(v1 - v0) * 1000.0,
+            embed_ms=max((e1 - e0) * 1000.0, 0.0),
+            vec_ms=max((v1 - v0) * 1000.0, 0.0),
             fts_ms=(f1 - f0) * 1000.0,
             fuse_ms=(fu1 - fu0) * 1000.0,
             rerank_ms=rr_ms,
@@ -273,4 +334,3 @@ class Engine:
             finally:
                 dest.close()
         return {"ok": True, "path": path}
-

@@ -8,7 +8,7 @@ import time
 
 import httpx
 
-UDS = os.getenv("QQ_UDS", "/run/qq.sock")
+UDS = os.getenv("QQ_UDS", os.path.expanduser("~/.qq/qq.sock"))
 
 
 def main():
@@ -31,4 +31,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

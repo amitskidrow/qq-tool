@@ -3,11 +3,12 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, Field
 
-from .qq_engine import Engine
+from .qq_engine import Engine, DEFAULT_DB_URI
 from .qq_embeddings import get_embedder
 
 
@@ -36,7 +37,8 @@ def build_app() -> FastAPI:
         # Warm embedder and engine
         emb = get_embedder()
         _ = emb.encode(["warmup"])  # prime caches
-        app.state.engine = Engine(embedder=emb)
+        db_path = os.getenv("QQ_DB", DEFAULT_DB_URI)
+        app.state.engine = Engine(embedder=emb, db_uri=db_path)
 
     @app.post("/upsert")
     def upsert(req: UpsertReq):
@@ -72,4 +74,3 @@ def build_app() -> FastAPI:
 
 
 app = build_app()
-

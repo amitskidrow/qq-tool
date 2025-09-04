@@ -1,6 +1,6 @@
 [project]
 name = "qq"
-version = "0.0.28"
+version = "0.0.29"
 description = "qq – local context server + CLI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ dependencies = [
   "transformers>=4.42",
   "optimum[onnxruntime]>=1.19",
   "tokenizers>=0.15",
-  "sqlite-vec>=0.1.7",
+  "sqlite-vec>=0.1.6",
 ]
 
 [project.scripts]
