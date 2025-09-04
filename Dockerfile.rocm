@@ -1,0 +1,44 @@
+# SAMPLE ROCm-enabled image (AMD GPU). This is a template and may require
+# adjustments for your ROCm version and host drivers.
+
+FROM rocm/dev-ubuntu-22.04:6.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=1000 \
+    PIP_PREFER_BINARY=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HOME=/dev/shm/hf \
+    TRANSFORMERS_CACHE=/dev/shm/hf \
+    QQ_ORT_PROVIDER=ROCMExecutionProvider
+
+WORKDIR /app
+
+# Install Python 3.11 and pip (via deadsnakes) + minimal deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      software-properties-common ca-certificates curl git \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      python3.11 python3.11-venv python3.11-distutils \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
+    && python3.11 /tmp/get-pip.py \
+    && rm -rf /var/lib/apt/lists/* /tmp/get-pip.py
+
+# Copy project files
+COPY pyproject.toml README.md /app/
+COPY src /app/src
+
+# Install build tools and project (prefer binary wheels)
+RUN python3.11 -m pip install --upgrade pip setuptools wheel \
+    && python3.11 -m pip install hatchling trove-classifiers \
+    && python3.11 -m pip install --no-build-isolation . \
+    && python3.11 -m pip install onnxruntime-rocm
+
+# Runtime
+ENV OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+# Uvicorn serving over a Unix domain socket
+CMD ["python3.11", "-m", "uvicorn", "qq.qq_api:app", "--uds", "/run/qq.sock", "--workers", "1"]
+

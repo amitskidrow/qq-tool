@@ -17,6 +17,7 @@ class EmbedInfo:
     dim: int
     warmed: bool
     load_ms: float
+    providers: List[str] | None = None
 
 
 class OnnxEmbedder:
@@ -41,12 +42,90 @@ class OnnxEmbedder:
         # Lazy imports to avoid heavy import time when not used
         from transformers import AutoTokenizer
         from optimum.onnxruntime import ORTModelForFeatureExtraction
+        import onnxruntime as ort
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        # Export to ONNX at first load if needed
-        self.model = ORTModelForFeatureExtraction.from_pretrained(
-            self.model_name, export=True
-        )
+
+        # Decide ONNX Runtime execution provider(s)
+        # - Default to CPU; allow opting into ROCm (AMD) or CUDA via env
+        # - Env: QQ_ORT_PROVIDER (e.g., "ROCMExecutionProvider") or
+        #        QQ_ORT_PROVIDERS (comma separated list)
+        env_single = (os.getenv("QQ_ORT_PROVIDER") or "").strip()
+        env_list = (os.getenv("QQ_ORT_PROVIDERS") or "").strip()
+
+        def _normalize_provider(name: str) -> str:
+            n = name.strip().lower()
+            if n in {"cpu", "cpuep", "cpuexecutionprovider"}:
+                return "CPUExecutionProvider"
+            if n in {"cuda", "cudaep", "cudaexecutionprovider"}:
+                return "CUDAExecutionProvider"
+            if n in {"rocm", "rocmep", "rocmexecutionprovider"}:  # permissive
+                return "ROCMExecutionProvider"
+            if n in {"dml", "dmlep", "dmlexecutionprovider"}:
+                return "DmlExecutionProvider"
+            if n in {"openvino", "openvinoexecutionprovider"}:
+                return "OpenVINOExecutionProvider"
+            return name  # assume exact provider name
+
+        providers: list[str]
+        if env_list:
+            providers = [_normalize_provider(p) for p in env_list.split(",") if p.strip()]
+        elif env_single:
+            providers = [_normalize_provider(env_single)]
+        else:
+            # Auto: prefer ROCm on AMD if available, else CPU
+            avail = set(ort.get_available_providers())
+            if "ROCMExecutionProvider" in avail:
+                providers = ["ROCMExecutionProvider", "CPUExecutionProvider"]
+            else:
+                providers = ["CPUExecutionProvider"]
+
+        # Export to ONNX at first load if needed, requesting chosen provider(s) when supported
+        model_loaded = False
+        last_err: Exception | None = None
+        for attempt in range(2):
+            try:
+                # Try new API with providers kw
+                self.model = ORTModelForFeatureExtraction.from_pretrained(
+                    self.model_name, export=True, providers=providers
+                )
+                model_loaded = True
+                break
+            except TypeError as e:
+                # Older optimum versions may not accept providers=; try provider=
+                last_err = e
+                try:
+                    self.model = ORTModelForFeatureExtraction.from_pretrained(
+                        self.model_name, export=True, provider=providers[0]
+                    )
+                    model_loaded = True
+                    break
+                except TypeError as e2:
+                    last_err = e2
+                    # Fall through to plain call without provider specification
+            except Exception as e:
+                # Provider not available or other runtime error; fall back to CPU once
+                last_err = e
+                if attempt == 0 and providers and providers[0] != "CPUExecutionProvider":
+                    providers = ["CPUExecutionProvider"]
+                    continue
+                break
+
+        if not model_loaded:
+            # Final fallback without explicit provider selection
+            self.model = ORTModelForFeatureExtraction.from_pretrained(
+                self.model_name, export=True
+            )
+            if last_err is not None:
+                warnings.warn(
+                    f"ORT provider selection fallback to CPU due to: {last_err}"
+                )
+
+        # Remember chosen providers (best-effort)
+        try:
+            self.providers = list(getattr(self.model, "providers", providers))  # type: ignore[attr-defined]
+        except Exception:
+            self.providers = providers
         # Determine output dimension by probing
         vec = self.encode(["dim-probe"])
         self._dim = int(vec.shape[1])
@@ -64,6 +143,7 @@ class OnnxEmbedder:
             dim=self._dim,
             warmed=True,
             load_ms=self._load_ms,
+            providers=list(getattr(self, "providers", []) or []),
         )
 
     def encode(self, texts: Iterable[str]) -> np.ndarray:
@@ -114,6 +194,7 @@ class SimpleEmbedder:
             dim=self._dim,
             warmed=True,
             load_ms=self._load_ms,
+            providers=None,
         )
 
     def encode(self, texts: Iterable[str]) -> np.ndarray:

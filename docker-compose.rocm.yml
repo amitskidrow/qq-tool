@@ -1,0 +1,31 @@
+services:
+  qq-api-rocm:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm
+    container_name: qq-api-rocm
+    restart: unless-stopped
+    environment:
+      QQ_EMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      QQ_ORT_PROVIDER: ROCMExecutionProvider
+      HF_HOME: /dev/shm/hf
+      TRANSFORMERS_CACHE: /dev/shm/hf
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - /run:/run
+    tmpfs:
+      - /dev/shm:size=2g
+      - /dev/shm/hf:size=3g
+
+# Usage:
+#   docker compose -f docker-compose.rocm.yml up -d
+# Ensure host ROCm drivers are installed and that the user can access /dev/kfd and /dev/dri.
