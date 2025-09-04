@@ -73,12 +73,19 @@ class Engine:
         except Exception:
             # Best-effort, continue if path cannot be created
             pass
-        self._embedder = embedder or get_embedder()
-        self.dim = dim or self._embedder.dim
+        # Defer embedder creation until after connection (so we know if vec is enabled)
+        self._embedder = None
+        self.dim = dim or 384  # default; will adjust if embedder is created
         self._lock = threading.RLock()
         self._conn = self._connect()
         self.vec_enabled = False
         self._init_db()
+        # Initialize embedder only if vectors are enabled and not supplied
+        if self.vec_enabled:
+            self._embedder = embedder or get_embedder()
+            # Update dim if not provided
+            if dim is None and hasattr(self._embedder, "dim"):
+                self.dim = int(self._embedder.dim)
 
     def _connect(self) -> sqlite3.Connection:
         is_uri = isinstance(self.db_uri, str) and self.db_uri.startswith("file:")
@@ -161,7 +168,7 @@ class Engine:
         # Embed (only if vectors enabled)
         vec = None
         e0 = e1 = time.perf_counter()
-        if self.vec_enabled:
+        if self.vec_enabled and self._embedder is not None:
             e0 = time.perf_counter()
             vec = self._embedder.encode([text])[0]
             e1 = time.perf_counter()
@@ -274,7 +281,7 @@ class Engine:
         # Embed only if vectors are enabled
         e0 = e1 = time.perf_counter()
         dense: List[Tuple[str, float]] = []
-        if self.vec_enabled:
+        if self.vec_enabled and self._embedder is not None:
             e0 = time.perf_counter()
             q_vec = self._embedder.encode([q])
             e1 = time.perf_counter()
