@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+import re
 
 try:
     import sqlite_vec  # type: ignore
@@ -249,9 +250,19 @@ class Engine:
 
     def _search_fts(self, q: str, k: int) -> List[Tuple[str, float]]:
         # FTS5 BM25: smaller is better -> convert to similarity
+        # Normalize user query into a safe FTS expression to avoid parse errors on punctuation.
+        # Strategy: tokenize on word chars and OR-join tokens, quoting each token.
+        tokens = re.findall(r"\w+", q, flags=re.UNICODE)
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            return []
+        # Limit token count to keep queries fast and safe
+        tokens = tokens[:32]
+        # Quote tokens to prevent clashes with FTS operators (AND, OR, NEAR, etc.)
+        q_expr = " OR ".join(f'"{t}"' for t in tokens)
         cur = self._conn.execute(
             "SELECT id, bm25(docs_fts) AS rank FROM docs_fts WHERE docs_fts MATCH ? ORDER BY rank LIMIT ?",
-            (q, k),
+            (q_expr, k),
         )
         rows = cur.fetchall()
         if not rows:
