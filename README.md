@@ -1,12 +1,11 @@
 qq — local context server + CLI
 
-Quickstart (Typesense-only)
+Quickstart (Docker Compose)
 
-- Start Typesense: `docker compose -f docker-typesense/docker-compose.yaml up -d`
-- Install (uv tools): `uv tool install --from . qq` or with pipx: `pipx install .`
+- Start both services: `docker compose up -d`
+- Install CLI (uv tools): `uv tool install --from . qq` or with pipx: `pipx install .`
 - First run: `qq setup` (bootstraps the `qq_docs` collection)
 - Doctor: `qq doctor` (checks Typesense and model keys)
-- Start API: `qq serve`
 
 Ingest & Query
 
@@ -24,20 +23,28 @@ Notes
 
 Low-Latency Mode (<1s queries)
 
-- Run the API as a background service so the embedding model stays in-memory.
-  - Manual: `qq serve --host 127.0.0.1 --port 8787`
-  - Systemd (user): see `scripts/systemd/qq.service` below.
-- Use the CLI in remote mode so it calls the API instead of loading the model every run:
-  - One-off: `qq query "..." --ns project:tradingapi --remote`
-  - Always: set `QQ_REMOTE=1` and optionally `QQ_REMOTE_URL=http://127.0.0.1:8787`
-- Choose a faster embedder if desired: `export QQ_EMBED_MODEL=all-MiniLM-L6-v2` (fast, 384-d).
+- Keep the API hot via Docker Compose. The API runs alongside Typesense and keeps the embedding model in memory.
+- The CLI auto-detects the API at `http://127.0.0.1:8787` and uses remote mode by default when it’s healthy.
+  - Force on: `qq query "..." --remote` or `export QQ_REMOTE=1`
+  - Override URL: `export QQ_REMOTE_URL=http://127.0.0.1:8787`
+- Choose a faster embedder if desired: `export QQ_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2` (fast, 384-d).
 - Optional GPU: `export QQ_EMBED_DEVICE=cuda` (falls back to CPU if unavailable).
 
-Systemd (User) Service
+Docker Compose Details
 
-1) Copy `scripts/systemd/qq.service` to `~/.config/systemd/user/qq.service` and adjust ExecStart and Environment as needed.
-2) `systemctl --user daemon-reload`
-3) `systemctl --user enable --now qq`
-4) Check status: `systemctl --user status qq`
+- Services: `typesense` on `127.0.0.1:8108`, `qq-api` on `127.0.0.1:8787`.
+- Persistence: Typesense data under named volume `typesense-data`.
+- Caches: model caches under `hf-cache` and `torch-cache` volumes to avoid re-downloads.
+- Healthchecks: compose waits for Typesense health before starting the API.
+- Tuning via env vars (set in compose or shell): `QQ_EMBED_MODEL`, `QQ_EMBED_DEVICE`, `QQ_TYPESENSE_*` (host/port/protocol/api key).
 
-The Typesense container is configured with `restart: unless-stopped`, so it will come up automatically after reboot once set up via docker compose.
+Notes
+
+- The compose is local-only and binds ports to `127.0.0.1`.
+- Dev-only Typesense key is `tsdev`. For a private machine, no extra auth is configured.
+- The legacy `docker-typesense/` setup has been removed. Use the root `docker-compose.yml` for both services.
+
+Build notes
+
+- The API image preinstalls CPU-only PyTorch to avoid downloading large CUDA wheels during build and uses no-build-isolation to stabilize dependency resolution.
+- If you have a CUDA GPU available, you can override at runtime with `QQ_EMBED_DEVICE=cuda` and switch to a GPU-enabled image/profile later.

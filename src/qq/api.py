@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from .embeddings import embed_texts
+from .embeddings import embed_texts, embedding_dim
 from .store_typesense import TypesenseStore
 from .util import infer_namespace
 
@@ -11,13 +11,24 @@ from .util import infer_namespace
 def build_app() -> FastAPI:
     app = FastAPI(title="qq API", version="0.0.1")
 
-    # Warm the embedding model on startup to avoid first-request latency
+    # Warm the embedding model and prepare Typesense on startup to avoid first-request latency
     @app.on_event("startup")
     def _warmup():
         try:
-            _ = embed_texts(["warmup"])  # loads model into memory
+            # Load model into memory and infer embedding dim
+            _ = embed_texts(["warmup"])
+            dim = embedding_dim()
         except Exception:
-            pass
+            dim = None
+
+        # Reuse a single Typesense client across requests
+        try:
+            app.state.store = TypesenseStore()
+            if dim is not None:
+                app.state.store.ensure_schema(dim)
+        except Exception:
+            # Defer failures to request-time exceptions
+            app.state.store = TypesenseStore()
 
     @app.get("/health")
     def health():
@@ -30,7 +41,7 @@ def build_app() -> FastAPI:
 
     @app.get("/query")
     def api_query(q: str, ns: str | None = None, topk: int = 5, hybrid: bool = True):
-        store = TypesenseStore()
+        store: TypesenseStore = getattr(app.state, "store", TypesenseStore())
         try:
             q_vec = embed_texts([q])[0]
             ns_final = ns or infer_namespace()
@@ -52,3 +63,6 @@ def build_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     return app
+
+# Export module-level app for Uvicorn discovery (uvicorn qq.api:app)
+app = build_app()

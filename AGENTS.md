@@ -8,8 +8,8 @@
 ## Build, Test, and Development Commands
 - Install (editable): `pip install -e .` (Python ≥3.10). Alternative: `uv pip install -e .`.
 - Install (tool): `uvx install --from . qq` or `pipx install .`.
-- Quickstart: `qq setup` (writes config, ensures Typesense collection and checks keys), `qq doctor` (re-checks), `qq serve --reload` (FastAPI on 127.0.0.1:8787).
-- Low-latency: run API as a background service and use `qq query --remote` (or set `QQ_REMOTE=1`).
+- Quickstart: `docker compose up -d` (Typesense + API), `qq setup` (writes config, ensures Typesense collection and checks keys), `qq doctor` (re-checks).
+- Low-latency: API runs via compose and stays hot; CLI auto-detects API and uses remote mode when healthy. Force with `qq query --remote` or `QQ_REMOTE=1`.
 - Retrieval: `qq ingest path/to/docs/` then `qq query "your question"`.
 - Release helper: `./deploy.sh` bumps patch in `pyproject.toml` and pushes.
 
@@ -30,5 +30,9 @@
 
 ## Security & Configuration Tips
 - Required services/keys: `OPENAI_API_KEY` and/or `GOOGLE_API_KEY`/`GEMINI_API_KEY` for models.
-- Performance env vars: `QQ_EMBED_MODEL` (e.g., `all-MiniLM-L6-v2`), `QQ_EMBED_DEVICE` (`cpu` | `cuda`), `QQ_REMOTE`, `QQ_REMOTE_URL`.
+- Performance env vars: `QQ_EMBED_MODEL` (e.g., `sentence-transformers/all-MiniLM-L6-v2`), `QQ_EMBED_DEVICE` (`cpu` | `cuda`), `QQ_REMOTE`, `QQ_REMOTE_URL`, and Typesense connection overrides `QQ_TYPESENSE_HOST|PORT|PROTOCOL|API_KEY`.
 - Do not commit credentials or `$HOME/.qq/` contents. Use `QQ_HOME` to point to a sandbox during tests.
+
+## Docker Notes
+- The legacy `docker-typesense/` compose has been removed; use the root `docker-compose.yml` to run Typesense and the qq API together.
+- The API Dockerfile preinstalls CPU-only PyTorch and disables build isolation in pip to stabilize dependency resolution and avoid large CUDA wheel downloads during `docker compose build`.

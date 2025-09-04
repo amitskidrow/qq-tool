@@ -6,15 +6,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import os
 import numpy as np
 import typesense
 import httpx
 
 
-TYPESENSE_HOST = "localhost"
-TYPESENSE_PORT = 8108
-TYPESENSE_PROTOCOL = "http"
-TYPESENSE_API_KEY = "tsdev"  # dev-only, embedded on purpose
+TYPESENSE_HOST = os.getenv("QQ_TYPESENSE_HOST", "localhost")
+try:
+    TYPESENSE_PORT = int(os.getenv("QQ_TYPESENSE_PORT", "8108"))
+except Exception:
+    TYPESENSE_PORT = 8108
+TYPESENSE_PROTOCOL = os.getenv("QQ_TYPESENSE_PROTOCOL", "http")
+TYPESENSE_API_KEY = os.getenv("QQ_TYPESENSE_API_KEY", "tsdev")  # dev-only default
 TYPESENSE_COLLECTION = "qq_docs"
 
 
@@ -55,6 +59,8 @@ class TypesenseStore:
             }
         )
         self.flat_search_cutoff = int(max(0, flat_search_cutoff))
+        # Reuse a persistent HTTP client for multi_search and health
+        self._http = httpx.Client(timeout=5.0)
 
     def _multi_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a search via POST /multi_search to avoid URL length limits.
@@ -83,7 +89,7 @@ class TypesenseStore:
                 "X-TYPESENSE-API-KEY": TYPESENSE_API_KEY,
                 "Content-Type": "application/json",
             }
-            r = httpx.post(url, json=payload, headers=headers, timeout=5.0)
+            r = self._http.post(url, json=payload, headers=headers)
             r.raise_for_status()
             res = r.json()
 
@@ -305,10 +311,9 @@ class TypesenseStore:
 
         # HTTP health
         try:
-            r = httpx.get(
+            r = self._http.get(
                 f"{TYPESENSE_PROTOCOL}://{TYPESENSE_HOST}:{TYPESENSE_PORT}/health",
                 headers={"X-TYPESENSE-API-KEY": TYPESENSE_API_KEY},
-                timeout=2.0,
             )
             check("http_health", r.status_code == 200, f"status={r.status_code}")
         except Exception as e:
