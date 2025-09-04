@@ -60,7 +60,13 @@ class TypesenseStore:
         )
         self.flat_search_cutoff = int(max(0, flat_search_cutoff))
         # Reuse a persistent HTTP client for multi_search and health
-        self._http = httpx.Client(timeout=5.0)
+        try:
+            ts_timeout = float(os.getenv("QQ_TYPESENSE_TIMEOUT", "2.0"))
+        except Exception:
+            ts_timeout = 2.0
+        self._http = httpx.Client(timeout=ts_timeout)
+        self._last_stats_at: float = 0.0
+        self._last_exhaustive: Optional[bool] = None
 
     def _multi_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a search via POST /multi_search to avoid URL length limits.
@@ -121,11 +127,20 @@ class TypesenseStore:
         return self.client.collections[TYPESENSE_COLLECTION]
 
     def _exhaustive(self) -> bool:
+        # Cache the decision briefly to reduce control-plane calls
+        now = time.time()
+        if self._last_exhaustive is not None and (now - self._last_stats_at) < 2.0:
+            return bool(self._last_exhaustive)
         try:
             stats = self._coll().retrieve()
             n = int(stats.get("num_documents") or 0)
-            return n <= self.flat_search_cutoff
+            res = n <= self.flat_search_cutoff
+            self._last_exhaustive = res
+            self._last_stats_at = now
+            return res
         except Exception:
+            self._last_exhaustive = False
+            self._last_stats_at = now
             return False
 
     # --- CRUD ---

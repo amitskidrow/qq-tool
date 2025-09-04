@@ -436,10 +436,16 @@ def query(
     """Vector mode: return top-N chunks with citations & metadata."""
     # Remote fast-path: always try the API first (single request), then fall back
     base = remote_url or os.getenv("QQ_REMOTE_URL") or "http://127.0.0.1:8787"
+    # Favor remote API. Timeout is short to avoid long stalls if API is down.
+    # Configure via QQ_REMOTE_TIMEOUT (seconds). Default: 1.0s
+    try:
+        _remote_timeout = float(os.getenv("QQ_REMOTE_TIMEOUT", "1.0"))
+    except Exception:
+        _remote_timeout = 1.0
     if remote or True:
         try:
             ns_final = ns or infer_namespace()
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=_remote_timeout) as client:
                 r = client.get(
                     f"{base}/query",
                     params={"q": q, "ns": ns_final, "topk": topk, "hybrid": hybrid},
@@ -448,6 +454,9 @@ def query(
                 data = r.json()
                 out = data.get("results", [])
                 payload = {"mode": "vector", "query": q, "ns": data.get("ns"), "topk": topk, "results": out}
+                # Optional debug hint for source path
+                if os.getenv("QQ_DEBUG"):
+                    payload["_remote"] = True
                 if compress is not None or max_tokens is not None:
                     texts = [str(i.get("snippet") or "") for i in out]
                     compressed_texts, ratio_applied = compress_texts(
@@ -462,6 +471,11 @@ def query(
                 typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
                 return
         except Exception as e:
+            # If strict remote is requested, fail fast instead of silently falling back.
+            strict_remote = bool(remote) or os.getenv("QQ_REMOTE_STRICT", "0").lower() in {"1", "true", "yes"}
+            if strict_remote:
+                console.print(f"[red]Remote query failed[/red]: {e}")
+                raise typer.Exit(code=1)
             if remote:
                 console.print(f"[yellow]Remote query failed[/yellow]: {e}. Falling back to local.")
 
