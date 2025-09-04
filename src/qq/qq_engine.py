@@ -266,6 +266,39 @@ class Engine:
         )
         rows = cur.fetchall()
         if not rows:
+            # Typo-tolerant LIKE fallback using character trigrams when FTS yields no hits.
+            # This is a best-effort, lightweight approach to catch small misspellings.
+            try:
+                # Avoid heavy scan on very large corpora
+                n_docs_row = self._conn.execute("SELECT COUNT(1) AS n FROM docs").fetchone()
+                n_docs = int(n_docs_row[0]) if n_docs_row is not None else 0
+                if n_docs <= 2000:
+                    grams: List[str] = []
+                    for t in tokens:
+                        t2 = t.strip()
+                        if len(t2) < 3:
+                            continue
+                        grams.extend([t2[i : i + 3] for i in range(0, len(t2) - 2)])
+                    # Deduplicate to limit queries
+                    grams = list(dict.fromkeys(grams))
+                    if grams:
+                        counts: Dict[str, int] = {}
+                        for g in grams:
+                            pat = f"%{g}%"
+                            for r in self._conn.execute(
+                                "SELECT id FROM docs WHERE text LIKE ?",
+                                (pat,),
+                            ).fetchall():
+                                did = r["id"] if "id" in r.keys() else r[0]
+                                counts[did] = counts.get(did, 0) + 1
+                        if counts:
+                            maxc = max(counts.values()) or 1
+                            scored = [(did, counts[did] / float(maxc)) for did in counts]
+                            scored.sort(key=lambda t: t[1], reverse=True)
+                            return scored[:k]
+            except Exception:
+                # Silent fallback failure -> return no results
+                pass
             return []
         ranks = [float(r["rank"]) if "rank" in r.keys() else float(r[1]) for r in rows]
         # Invert and normalize into [0,1]

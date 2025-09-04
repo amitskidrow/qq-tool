@@ -79,12 +79,34 @@ def ingest(path: str = typer.Argument(..., help="File or directory to ingest")):
         typer.echo(json.dumps({"ok": True, "ingested": added, "mode": "local"}))
 
 
-def _render_plain(q: str, k: int, mode: str, db: str, results: List[Tuple[str, float]], elapsed_ms: float) -> str:
+def _render_plain(
+    q: str,
+    k: int,
+    mode: str,
+    db: str,
+    results: List[Tuple[str, float]],
+    elapsed_ms: float,
+    texts: Optional[dict] = None,
+) -> str:
     from qq import __version__
     header = f"QQ {__version__} | mode={mode} | k={k} | db={db} | q=\"{q}\" | {int(elapsed_ms)}ms"
     lines = [header]
     for i, (rid, score) in enumerate(results, start=1):
+        # Always show id/score
         lines.append(f"{i} | score={score:.4f} | id={rid}")
+        # If text content available (local mode), print a plain-text body block
+        if texts is not None and rid in texts:
+            body = texts[rid].get("text", "")
+            path = texts[rid].get("path") or ""
+            if path:
+                lines.append(f"path={path}")
+            # Trim excessively long output to keep terminal usable
+            max_chars = int(os.getenv("QQ_MAX_PRINT_CHARS", "4000"))
+            if max_chars > 0 and len(body) > max_chars:
+                lines.append(body[:max_chars])
+                lines.append(f"[... truncated {len(body) - max_chars} chars ...]")
+            else:
+                lines.append(body)
     lines.append(f"results={len(results)} | elapsed={int(elapsed_ms)}ms")
     return "\n".join(lines)
 
@@ -127,8 +149,29 @@ def query(
         typer.echo(json.dumps(data))
         return
     results = [(h.id, h.score) for h in hits]
+    # Collect plain-text bodies for local mode to print human-readable content
+    text_map = {}
+    if results:
+        ids = [rid for rid, _ in results]
+        qmarks = ",".join(["?"] * len(ids))
+        rows = eng._conn.execute(  # type: ignore[attr-defined]
+            f"SELECT id, text, meta FROM docs WHERE id IN ({qmarks})",
+            ids,
+        ).fetchall()
+        for r in rows:
+            rid = r["id"] if "id" in r.keys() else r[0]
+            text = r["text"] if "text" in r.keys() else r[1]
+            meta_raw = r["meta"] if "meta" in r.keys() else r[2]
+            path = None
+            try:
+                if meta_raw:
+                    meta = json.loads(meta_raw)
+                    path = meta.get("path") if isinstance(meta, dict) else None
+            except Exception:
+                path = None
+            text_map[rid] = {"text": text, "path": path}
     mode = "hybrid" if getattr(eng, "vec_enabled", False) else "fts"
-    typer.echo(_render_plain(q, k, mode, db, results, tm.total_ms))
+    typer.echo(_render_plain(q, k, mode, db, results, tm.total_ms, texts=text_map))
 
 
 @app.command()
