@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from .embeddings import embed_texts, embedding_dim
@@ -14,7 +15,7 @@ from .util import infer_namespace
 
 
 def build_app() -> FastAPI:
-    app = FastAPI(title="qq API", version="0.0.1")
+    app = FastAPI(title="qq API", version="0.0.1", default_response_class=ORJSONResponse)
     app.state.embed_info = {
         "model": None,
         "device": None,

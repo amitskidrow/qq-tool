@@ -1,6 +1,6 @@
 [project]
 name = "qq"
-version = "0.0.25"
+version = "0.0.26"
 description = "qq – local context server + CLI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ dependencies = [
   "pydantic>=2.7",
   "httpx>=0.27",
   "fastapi>=0.111",
-  "uvicorn>=0.30",
+  "uvicorn[standard]>=0.30",
   "rich>=13.7",
   "sentence-transformers>=3.0",
   "numpy>=1.26",
@@ -21,6 +21,7 @@ dependencies = [
   "openai>=1.40.0",
   "google-generativeai>=0.7.2",
   "typesense>=0.20.1",
+  "orjson>=3.10.0",
 ]
 
 [project.scripts]

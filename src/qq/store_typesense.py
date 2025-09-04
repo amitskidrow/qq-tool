@@ -241,6 +241,9 @@ class TypesenseStore:
             "query_by": "text",
             "vector_query": f"embedding:([{vec}], k:{int(max(1, topk))})",
             "per_page": int(max(1, topk)),
+            # return only what we need; drop embedding payloads
+            "include_fields": "id,source,text,namespace",
+            "exclude_fields": "embedding",
         }
         if namespace:
             params["filter_by"] = f"namespace:={namespace}"
@@ -266,6 +269,8 @@ class TypesenseStore:
             "query_by": "text",
             "vector_query": f"embedding:([{vec}], k:{int(max(1, topk))}, alpha:{max(0.0, min(1.0, float(alpha))):.2f})",
             "per_page": int(max(1, topk)),
+            "include_fields": "id,source,text,namespace",
+            "exclude_fields": "embedding",
         }
         if namespace:
             params["filter_by"] = f"namespace:={namespace}"

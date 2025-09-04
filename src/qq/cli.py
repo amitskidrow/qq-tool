@@ -434,112 +434,50 @@ def query(
     remote_url: Optional[str] = typer.Option(None, "--remote-url", help="Override API URL (default http://127.0.0.1:8787)"),
 ):
     """Vector mode: return top-N chunks with citations & metadata."""
-    # Remote fast-path: always try the API first (single request), then fall back
+    # Remote-only: always use the API (single request). No local fallback.
     base = remote_url or os.getenv("QQ_REMOTE_URL") or "http://127.0.0.1:8787"
     # Favor remote API. Timeout is short to avoid long stalls if API is down.
-    # Configure via QQ_REMOTE_TIMEOUT (seconds). Default: 1.0s
+    # Configure via QQ_REMOTE_TIMEOUT (seconds). Default: 0.6s
     try:
-        _remote_timeout = float(os.getenv("QQ_REMOTE_TIMEOUT", "1.0"))
+        _remote_timeout = float(os.getenv("QQ_REMOTE_TIMEOUT", "0.6"))
     except Exception:
-        _remote_timeout = 1.0
-    if remote or True:
-        try:
-            ns_final = ns or infer_namespace()
-            with httpx.Client(timeout=_remote_timeout) as client:
-                r = client.get(
-                    f"{base}/query",
-                    params={"q": q, "ns": ns_final, "topk": topk, "hybrid": hybrid},
+        _remote_timeout = 0.6
+    try:
+        ns_final = ns or infer_namespace()
+        with httpx.Client(timeout=_remote_timeout) as client:
+            r = client.get(
+                f"{base}/query",
+                params={"q": q, "ns": ns_final, "topk": topk, "hybrid": hybrid},
+            )
+            r.raise_for_status()
+            data = r.json()
+            out = data.get("results", [])
+            payload = {"mode": "vector", "query": q, "ns": data.get("ns"), "topk": topk, "results": out}
+            # Optional debug hint for source path
+            if os.getenv("QQ_DEBUG"):
+                payload["_remote"] = True
+            if compress is not None or max_tokens is not None:
+                texts = [str(i.get("snippet") or "") for i in out]
+                compressed_texts, ratio_applied = compress_texts(
+                    texts,
+                    ratio=(max(1, min(99, int(compress))) / 100.0) if compress is not None else None,
+                    max_tokens=max_tokens,
                 )
-                r.raise_for_status()
-                data = r.json()
-                out = data.get("results", [])
-                payload = {"mode": "vector", "query": q, "ns": data.get("ns"), "topk": topk, "results": out}
-                # Optional debug hint for source path
-                if os.getenv("QQ_DEBUG"):
-                    payload["_remote"] = True
-                if compress is not None or max_tokens is not None:
-                    texts = [str(i.get("snippet") or "") for i in out]
-                    compressed_texts, ratio_applied = compress_texts(
-                        texts,
-                        ratio=(max(1, min(99, int(compress))) / 100.0) if compress is not None else None,
-                        max_tokens=max_tokens,
-                    )
-                    for i, t in zip(out, compressed_texts):
-                        i["snippet"] = t[:240]
-                    payload["compressed"] = True
-                    payload["compression_ratio"] = ratio_applied
+                for i, t in zip(out, compressed_texts):
+                    i["snippet"] = t[:240]
+                payload["compressed"] = True
+                payload["compression_ratio"] = ratio_applied
+            # Compact JSON for speed unless interactive
+            if _interactive_from_ctx(ctx):
                 typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
-                return
-        except Exception as e:
-            # If strict remote is requested, fail fast instead of silently falling back.
-            strict_remote = bool(remote) or os.getenv("QQ_REMOTE_STRICT", "0").lower() in {"1", "true", "yes"}
-            if strict_remote:
-                console.print(f"[red]Remote query failed[/red]: {e}")
-                raise typer.Exit(code=1)
-            if remote:
-                console.print(f"[yellow]Remote query failed[/yellow]: {e}. Falling back to local.")
-
-    store = _get_store()
-
-    # Embed query
-    try:
-        q_vec = embed_texts([q])[0]
+            else:
+                typer.echo(json.dumps(payload, ensure_ascii=False))
+            return
     except Exception as e:
-        console.print(f"[red]Embedding failed[/red]: {e}")
+        console.print(f"[red]Remote query failed[/red]: {e}")
         raise typer.Exit(code=1)
 
-    # Filter by ns if provided/inferred
-    ns_final = ns or infer_namespace()
-
-    # tune exact scan cutoff
-    try:
-        store.flat_search_cutoff = int(max(0, flat))
-        if hybrid:
-            results = store.search_hybrid(q_vec, q, namespace=ns_final, topk=topk, alpha=alpha)
-        else:
-            results = store.search_dense(q_vec, namespace=ns_final, topk=topk)
-    except Exception as e:
-        console.print(f"[red]Search failed[/red]: {e}")
-        raise typer.Exit(code=1)
-
-    out = []
-    # Optional reranking (kept as-is); apply on candidate texts
-    if rerank:
-        try:
-            from .rerank import rerank_pairs
-            cfg_rk = load_config().get("retrieval", {}).get("reranker", {})
-            model_name = cfg_rk.get("model", "BAAI/bge-reranker-large")
-            cand_texts = [r.text or "" for r in results]
-            order = rerank_pairs(model_name, q, cand_texts)
-            results = [results[i] for i, _ in order][:topk]
-        except Exception as e:
-            console.print(f"[yellow]Rerank failed[/yellow]: {e}")
-            results = results[:topk]
-
-    texts = [r.text or "" for r in results[:topk]]
-    compressed = False
-    ratio_applied = 1.0
-    if compress is not None or max_tokens is not None:
-        compressed = True
-        if compress is not None:
-            ratio = max(1, min(99, int(compress))) / 100.0
-            texts, ratio_applied = compress_texts(texts, ratio=ratio)
-        else:
-            texts, ratio_applied = compress_texts(texts, max_tokens=max_tokens)
-
-    for (r, t) in zip(results[:topk], texts):
-        out.append({
-            "id": r.id,
-            "score": float(r.score or 0.0),
-            "source": r.uri,
-            "namespace": r.namespace,
-            "snippet": (t or "")[:240],
-        })
-    payload = {"mode": "vector", "query": q, "ns": ns_final, "topk": topk, "results": out}
-    if compressed:
-        payload["compressed"] = True
-        payload["compression_ratio"] = ratio_applied
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    # Unreachable: remote is required and we exit above on failures.
 
 
 @app.command()

@@ -7,6 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=1000 \
     PIP_NO_CACHE_DIR=1
+    \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    HF_HUB_DISABLE_TELEMETRY=1
 
 WORKDIR /app
 
@@ -32,6 +36,13 @@ RUN pip install --index-url ${TORCH_INDEX_URL} \
 
 # Install the package without build isolation so preinstalled deps are reused
 RUN pip install --no-build-isolation .
+
+# Preload the default fast embedding model to avoid first-request download latency
+RUN python - <<'PY'
+from sentence_transformers import SentenceTransformer
+SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+print("Preloaded MiniLM-L6-v2")
+PY
 
 # Expose API port
 EXPOSE 8787
