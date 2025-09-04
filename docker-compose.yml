@@ -1,56 +1,14 @@
 services:
-  typesense:
-    image: typesense/typesense:0.25.2
-    container_name: qq-typesense
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8108:8108"
-    volumes:
-      - typesense-data:/data
-    command: [
-      "--data-dir", "/data",
-      "--api-key", "tsdev",
-      "--api-port", "8108",
-      "--enable-cors"
-    ]
-
   qq-api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: qq-api
     restart: unless-stopped
-    depends_on:
-      - typesense
-    # Enable AMD ROCm GPU access in the container
-    devices:
-      - "/dev/kfd:/dev/kfd"
-      - "/dev/dri:/dev/dri"
-    # group_add is optional when running as root; remove 'render' to avoid host group mismatch
-    group_add:
-      - "video"
     environment:
-      # Point API to the Typesense service inside the compose network
-      QQ_TYPESENSE_HOST: typesense
-      QQ_TYPESENSE_PORT: "8108"
-      QQ_TYPESENSE_PROTOCOL: http
-      QQ_TYPESENSE_API_KEY: tsdev
-      # Performance defaults (override as needed)
       QQ_EMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
-      QQ_EMBED_DEVICE: cuda
-    ports:
-      - "127.0.0.1:8787:8787"
-    healthcheck:
-      test: ["CMD", "curl", "-sS", "http://localhost:8787/health"]
-      interval: 5s
-      timeout: 2s
-      retries: 30
-      start_period: 10s
     volumes:
-      - hf-cache:/root/.cache/huggingface
-      - torch-cache:/root/.cache/torch
-
-volumes:
-  typesense-data:
-  hf-cache:
-  torch-cache:
+      - /run:/run
+    tmpfs:
+      - /dev/shm:size=1g
+      - /dev/shm/hf:size=2g

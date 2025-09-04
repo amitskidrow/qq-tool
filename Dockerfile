@@ -6,54 +6,32 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=1000 \
-    PIP_NO_CACHE_DIR=1
-    \
+    PIP_PREFER_BINARY=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
-    HF_HUB_DISABLE_TELEMETRY=1
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HOME=/dev/shm/hf \
+    TRANSFORMERS_CACHE=/dev/shm/hf
 
 WORKDIR /app
 
-# System dependencies for scientific stack (optional but helps wheels)
+# Minimal system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl build-essential \
+    ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
 COPY pyproject.toml README.md /app/
 COPY src /app/src
 
-# Upgrade pip tooling and preinstall build backend to avoid resolver issues
 RUN python -m pip install --upgrade pip setuptools wheel \
  && pip install hatchling trove-classifiers
-
-# Install a ROCm-enabled PyTorch build for AMD GPUs.
-# Allow overriding the ROCm index at build time for host compatibility.
-# Common options: rocm6.0, rocm6.1
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/rocm6.0
-RUN pip install --index-url ${TORCH_INDEX_URL} \
-    torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1
 
 # Install the package without build isolation so preinstalled deps are reused
 RUN pip install --no-build-isolation .
 
-# Preload the default fast embedding model to avoid first-request download latency
-RUN python - <<'PY'
-from sentence_transformers import SentenceTransformer
-SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-print("Preloaded MiniLM-L6-v2")
-PY
+# Default environment
+ENV QQ_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
 
-# Expose API port
-EXPOSE 8787
-
-# Default environment (can be overridden via compose)
-ENV QQ_TYPESENSE_HOST=localhost \
-    QQ_TYPESENSE_PORT=8108 \
-    QQ_TYPESENSE_PROTOCOL=http \
-    QQ_TYPESENSE_API_KEY=tsdev \
-    QQ_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
-    QQ_EMBED_DEVICE=cuda
-
-# Run the FastAPI app
-CMD ["uvicorn", "qq.api:app", "--host", "0.0.0.0", "--port", "8787", "--workers", "1"]
+# Run the FastAPI app bound to a Unix domain socket
+CMD ["uvicorn", "qq.qq_api:app", "--uds", "/run/qq.sock", "--workers", "1"]

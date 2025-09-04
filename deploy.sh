@@ -66,8 +66,12 @@ origin_spec() {
   if [[ -z "$origin" ]]; then
     echo ""; return 0
   fi
+  # Prefer explicit deploy branch, defaulting to api_sql_arch for this migration
   local branch
-  branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  branch=${DEPLOY_BRANCH:-api_sql_arch}
+  if [[ -z "$branch" ]]; then
+    branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  fi
   local https
   if [[ "$origin" =~ ^git@github.com:(.*)\.git$ ]]; then
     https="https://github.com/${BASH_REMATCH[1]}.git"
@@ -79,7 +83,7 @@ origin_spec() {
   if [[ "$https" != git+* ]]; then
     https="git+${https}"
   fi
-  # default to @<current-branch> ref
+  # default to @<branch> ref
   if [[ "$https" != *"@"* ]]; then
     https="${https}@${branch}"
   fi

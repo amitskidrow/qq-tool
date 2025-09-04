@@ -2,7 +2,12 @@ import sys
 from typing import List, Optional
 
 from . import __version__
-from .cli import app
+try:
+    # New UDS-based CLI
+    from .qq_cli import app  # type: ignore
+except Exception:
+    # Fallback to legacy CLI if import fails
+    from .cli import app  # type: ignore
 
 
 def main(argv: Optional[List[str]] = None):
@@ -16,4 +21,3 @@ def main(argv: Optional[List[str]] = None):
 
     # Fallback to Typer app (supports 'version' command too)
     app()
-
