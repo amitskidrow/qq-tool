@@ -26,11 +26,10 @@ def _client() -> httpx.Client:
 # In-process fallback
 def _fallback_engine():
     from .qq_engine import Engine, DEFAULT_DB_URI
-    from .qq_embeddings import get_embedder
 
     db = os.getenv("QQ_DB", DEFAULT_DB_URI)
-    emb = get_embedder()
-    return Engine(db_uri=db, embedder=emb)
+    # Do not instantiate embedder here; Engine will decide based on vec availability
+    return Engine(db_uri=db)
 
 
 def _hash_id(path: Path) -> str:
@@ -143,4 +142,3 @@ def snapshot(to: str = typer.Argument(..., help="Absolute path to write snapshot
         eng = _fallback_engine()
         res = eng.snapshot(to)
         typer.echo(json.dumps(res))
-

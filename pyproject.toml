@@ -1,6 +1,6 @@
 [project]
 name = "qq"
-version = "0.0.31"
+version = "0.0.32"
 description = "qq – local context server + CLI"
 readme = "README.md"
 requires-python = ">=3.11"
