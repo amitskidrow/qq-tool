@@ -104,10 +104,26 @@ class TypesenseStore:
 
     # --- Schema / bootstrap ---
     def ensure_schema(self, dim: int) -> None:
+        desired_dim = int(dim)
+        # If collection exists, verify embedding dimension and recreate if mismatched.
         try:
-            self.client.collections[TYPESENSE_COLLECTION].retrieve()
-            return
+            coll = self.client.collections[TYPESENSE_COLLECTION].retrieve()
+            fields = {f.get("name"): f for f in coll.get("fields", [])}
+            emb = fields.get("embedding") or {}
+            current_dim = emb.get("num_dim")
+            if current_dim is None:
+                # No embedding field? Recreate collection.
+                raise KeyError("embedding field missing")
+            if int(current_dim) == desired_dim:
+                return
+            # Dimension mismatch → recreate collection with the desired dimension
+            try:
+                self.client.collections[TYPESENSE_COLLECTION].delete()
+            except Exception:
+                # If delete fails, surface original problem later
+                pass
         except Exception:
+            # Collection missing or malformed: proceed to create
             pass
 
         schema = {
@@ -116,7 +132,7 @@ class TypesenseStore:
                 {"name": "namespace", "type": "string", "facet": True},
                 {"name": "source", "type": "string", "facet": True},
                 {"name": "text", "type": "string"},
-                {"name": "embedding", "type": "float[]", "num_dim": int(dim)},
+                {"name": "embedding", "type": "float[]", "num_dim": desired_dim},
                 {"name": "created_at", "type": "int64"},
                 {"name": "updated_at", "type": "int64"},
             ],
