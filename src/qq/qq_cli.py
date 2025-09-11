@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 import httpx
+import time
 import typer
 
 app = typer.Typer(add_completion=False, help="qq CLI (UDS client)")
@@ -167,7 +168,35 @@ def query(
     except Exception:
         pass
 
-    # Fallback to local engine
+    # Prefer new-arch store fallback; if not available, use legacy engine
+    try:
+        from .store_sqlite import Store
+        t0 = time.perf_counter()
+        store = Store()
+        # Use k for all caps to keep CLI expectations simple
+        pairs = store.search_hybrid(q, K_lex=k, K_sem=k, K_merge=k, alpha=alpha)
+        t1 = time.perf_counter()
+        # Convert to (id, score) with id as chunk_id string
+        results = [(str(cid), float(score)) for cid, score in pairs]
+        text_map = {}
+        if results:
+            chunk_ids = [int(rid) for rid, _ in results]
+            text_map = store.get_chunks(chunk_ids)
+        mode = "hybrid-store" if store.vec_enabled else "fts-store"
+        elapsed = (t1 - t0) * 1000.0
+        if json_out:
+            data = {
+                "results": [{"id": rid, "score": sc} for rid, sc in results],
+                "timings": {"total_ms": elapsed},
+            }
+            typer.echo(json.dumps(data))
+            return
+        typer.echo(_render_plain(q, k, mode, db, results, elapsed, texts=text_map))
+        return
+    except Exception:
+        pass
+
+    # Legacy fallback
     eng = _fallback_engine()
     hits, tm = eng.query(q, k=k, alpha=alpha, rerank=rerank)
     if json_out:
@@ -178,7 +207,6 @@ def query(
         typer.echo(json.dumps(data))
         return
     results = [(h.id, h.score) for h in hits]
-    # Collect plain-text bodies for local mode to print human-readable content
     text_map = {}
     if results:
         ids = [rid for rid, _ in results]

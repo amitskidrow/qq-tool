@@ -5,7 +5,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Iterable, List
 
 import numpy as np
 
@@ -58,6 +58,8 @@ class Store:
             pass
         self._vec_enabled = self._try_load_vec()
         self._init_schema()
+        # Lazy embedder init on demand
+        self._embedder = None
 
     # ---------- setup ----------
     def _try_load_vec(self) -> bool:
@@ -294,6 +296,131 @@ class Store:
             self.conn.row_factory = sqlite3.Row
         finally:
             src.close()
+
+    # ---------- retrieval ----------
+    def _pack_vec(self, v: np.ndarray):
+        try:
+            import sqlite_vec  # type: ignore
+
+            vec = v.astype(np.float32).reshape(-1)
+            if hasattr(sqlite_vec, "serialize"):
+                return sqlite_vec.serialize(vec.tolist())  # type: ignore
+            if hasattr(sqlite_vec, "serialize_float32"):
+                return sqlite_vec.serialize_float32(vec)  # type: ignore
+            if hasattr(sqlite_vec, "pack"):
+                return sqlite_vec.pack(vec.tolist())  # type: ignore
+            return sqlite3.Binary(vec.tobytes())
+        except Exception:
+            return sqlite3.Binary(v.astype(np.float32).reshape(-1).tobytes())
+
+    @property
+    def vec_enabled(self) -> bool:
+        return bool(self._vec_enabled)
+
+    def _safe_fts_query(self, q: str) -> Optional[str]:
+        import re as _re
+
+        toks = _re.findall(r"\w+", q, flags=_re.UNICODE)
+        toks = [t for t in toks if t]
+        if not toks:
+            return None
+        toks = toks[:32]
+        return " OR ".join(f'"{t}"' for t in toks)
+
+    def search_fts(self, q: str, k: int) -> List[Tuple[int, float]]:
+        expr = self._safe_fts_query(q)
+        if not expr:
+            return []
+        cur = self.conn.execute(
+            "SELECT chunk_id, bm25(fts) AS rank FROM fts WHERE fts MATCH ? ORDER BY rank LIMIT ?",
+            (expr, k),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return []
+        ranks = [float(r["rank"]) if "rank" in r.keys() else float(r[1]) for r in rows]
+        max_r = max(ranks) if ranks else 1.0
+        min_r = min(ranks) if ranks else 0.0
+        denom = max(max_r - min_r, 1e-9)
+        out: List[Tuple[int, float]] = []
+        for r in rows:
+            cid = int(r["chunk_id"]) if "chunk_id" in r.keys() else int(r[0])
+            val = float(r["rank"]) if "rank" in r.keys() else float(r[1])
+            sim = 1.0 - ((val - min_r) / denom)
+            out.append((cid, sim))
+        return out
+
+    def search_vec(self, q: str, k: int) -> List[Tuple[int, float]]:
+        if not self._vec_enabled:
+            return []
+        # Init embedder lazily
+        if self._embedder is None:
+            self._embedder = get_embedder()
+        q_vec = self._embedder.encode([q])
+        blob = self._pack_vec(q_vec)
+        cur = self.conn.execute(
+            "SELECT rowid, distance FROM vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            (blob, k),
+        )
+        out: List[Tuple[int, float]] = []
+        for r in cur.fetchall():
+            rid = int(r["rowid"]) if "rowid" in r.keys() else int(r[0])
+            dist = float(r["distance"]) if "distance" in r.keys() else float(r[1])
+            sim = 1.0 - dist
+            id_row = self.conn.execute("SELECT chunk_id FROM vec_map WHERE rid=?", (rid,)).fetchone()
+            if id_row:
+                out.append((int(id_row[0]), sim))
+        return out
+
+    def search_hybrid(
+        self,
+        q: str,
+        *,
+        K_lex: int = 30,
+        K_sem: int = 30,
+        K_merge: int = 50,
+        alpha: float = 0.55,
+    ) -> List[Tuple[int, float]]:
+        dense: List[Tuple[int, float]] = []
+        if self._vec_enabled:
+            try:
+                dense = self.search_vec(q, K_sem)
+            except Exception:
+                dense = []
+        sparse = self.search_fts(q, K_lex)
+        scores: Dict[int, float] = {}
+        if dense:
+            for cid, s in dense:
+                scores[cid] = scores.get(cid, 0.0) + alpha * s
+        if sparse:
+            w = (1.0 - alpha) if self._vec_enabled else 1.0
+            for cid, s in sparse:
+                scores[cid] = scores.get(cid, 0.0) + w * s
+        items = list(scores.items())
+        items.sort(key=lambda t: t[1], reverse=True)
+        return items[:K_merge]
+
+    def get_chunks(self, ids: Iterable[int]) -> Dict[str, Dict[str, Any]]:
+        ids = list({int(x) for x in ids})
+        if not ids:
+            return {}
+        qmarks = ",".join(["?"] * len(ids))
+        sql = f"""
+        SELECT c.chunk_id, c.content, c.section_path, d.doc_id, d.source
+        FROM chunks c
+        JOIN docs d ON d.doc_id = c.doc_id
+        WHERE c.chunk_id IN ({qmarks})
+        """
+        rows = self.conn.execute(sql, ids).fetchall()
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            cid = int(r["chunk_id"]) if "chunk_id" in r.keys() else int(r[0])
+            content = r["content"] if "content" in r.keys() else r[1]
+            section_path = r["section_path"] if "section_path" in r.keys() else r[2]
+            doc_id = r["doc_id"] if "doc_id" in r.keys() else r[3]
+            source = r["source"] if "source" in r.keys() else r[4]
+            out[str(cid)] = {"text": content, "path": source, "section_path": section_path, "doc_id": doc_id}
+        return out
 
 
 def ingest_text(
