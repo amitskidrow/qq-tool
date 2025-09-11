@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import httpx
 import time
+import time
 import typer
 
 app = typer.Typer(add_completion=False, help="qq CLI (UDS client)")
@@ -171,31 +172,62 @@ def query(
     # Prefer new-arch store fallback; if not available, use legacy engine
     try:
         from .store_sqlite import Store
+        from .rerank import rerank_pairs
+        S_THRESH = 0.12
+        CE_THRESH = 0.20
         t0 = time.perf_counter()
         store = Store()
         # Use k for all caps to keep CLI expectations simple
         pairs = store.search_hybrid(q, K_lex=k, K_sem=k, K_merge=k, alpha=alpha)
+        ce_top_score = None
+        if rerank and pairs:
+            try:
+                chunk_ids = [cid for cid, _ in pairs]
+                mp = store.get_chunks(chunk_ids)
+                passages = [mp.get(str(cid), {}).get("text", "") for cid, _ in pairs]
+                idx_scores = rerank_pairs("cross-encoder/ms-marco-MiniLM-L-6-v2", q, passages)
+                # Reorder pairs using CE scores
+                ce_scores_map = {i: s for i, s in idx_scores}
+                pairs = [(pairs[i][0], pairs[i][1]) for i, _ in idx_scores][:k]
+                # Capture top CE
+                if idx_scores:
+                    ce_top_score = float(idx_scores[0][1])
+            except Exception:
+                # If rerank fails, keep hybrid order
+                ce_top_score = None
         t1 = time.perf_counter()
-        # Convert to (id, score) with id as chunk_id string
-        results = [(str(cid), float(score)) for cid, score in pairs]
+        mode = "hybrid-store" if store.vec_enabled else "fts-store"
+        elapsed = (t1 - t0) * 1000.0
+        # Abstain check
+        abstained = False
+        if pairs:
+            hybrid_top = float(pairs[0][1])
+            if ce_top_score is not None and hybrid_top < S_THRESH and ce_top_score < CE_THRESH:
+                abstained = True
+        # Convert to output
+        results = [] if abstained else [(str(cid), float(score)) for cid, score in pairs]
         text_map = {}
         if results:
             chunk_ids = [int(rid) for rid, _ in results]
             text_map = store.get_chunks(chunk_ids)
-        mode = "hybrid-store" if store.vec_enabled else "fts-store"
-        elapsed = (t1 - t0) * 1000.0
         if json_out:
-            data = {
+            out = {
                 "results": [{"id": rid, "score": sc} for rid, sc in results],
                 "timings": {"total_ms": elapsed},
             }
-            typer.echo(json.dumps(data))
+            if abstained:
+                out["abstained"] = True
+                out["answer"] = "No relevant paragraph found."
+                out["scores"] = {"hybrid_top": pairs[0][1] if pairs else 0.0, "ce_top": ce_top_score}
+            typer.echo(json.dumps(out))
+            return
+        if abstained:
+            typer.echo("No relevant paragraph found.")
             return
         typer.echo(_render_plain(q, k, mode, db, results, elapsed, texts=text_map))
         return
     except Exception:
         pass
-
     # Legacy fallback
     eng = _fallback_engine()
     hits, tm = eng.query(q, k=k, alpha=alpha, rerank=rerank)
