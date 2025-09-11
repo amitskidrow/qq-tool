@@ -55,7 +55,8 @@ def _iter_files(p: Path) -> Iterable[Path]:
 
 
 @app.command()
-def ingest(path: str = typer.Argument(..., help="File or directory to ingest")):
+def ingest(path: str = typer.Argument(..., help="File or directory to ingest"),
+          graph_lite: bool = typer.Option(False, "--graph-lite/--no-graph-lite", help="Extract graph-lite from sections")):
     p = Path(path)
     if not p.exists():
         typer.echo(json.dumps({"ok": False, "error": f"path not found: {path}"}))
@@ -87,9 +88,11 @@ def ingest(path: str = typer.Argument(..., help="File or directory to ingest")):
             return
         store = Store()
         totals = {"docs": 0, "chunks": 0, "duplicates": 0, "embedded": 0}
+        _docs: list[str] = []
         for f in _iter_files(p):
             text = f.read_text(encoding="utf-8", errors="ignore")
             doc_id = _hash_id(f)
+            _docs.append(doc_id)
             counts = ingest_text(
                 store,
                 doc_id=doc_id,
@@ -106,6 +109,12 @@ def ingest(path: str = typer.Argument(..., help="File or directory to ingest")):
             totals["duplicates"] += counts.duplicates
             totals["embedded"] += counts.embedded
             added += 1
+        if graph_lite and _docs:
+            for _d in _docs:
+                try:
+                    store.build_graph_for_doc(_d)
+                except Exception:
+                    pass
         out = {"ok": True, "ingested": added, "mode": "local-store", **totals}
         typer.echo(json.dumps(out))
 
@@ -148,6 +157,7 @@ def query(
     k: int = typer.Option(5, "--k", help="Top-K results"),
     alpha: float = typer.Option(0.6, "--alpha", help="Dense weight [0,1] (hybrid only)"),
     rerank: bool = typer.Option(False, "--rerank/--no-rerank", help="Enable reranker"),
+    graph_boost: bool = typer.Option(False, "--graph-boost/--no-graph-boost", help="Enable graph-lite boost"),
     json_out: bool = typer.Option(False, "--json", help="Output raw JSON"),
 ):
     db = os.getenv("QQ_DB", os.path.expanduser("~/.qq/global.db"))
@@ -178,7 +188,7 @@ def query(
         t0 = time.perf_counter()
         store = Store()
         # Use k for all caps to keep CLI expectations simple
-        pairs = store.search_hybrid(q, K_lex=k, K_sem=k, K_merge=k, alpha=alpha)
+        pairs = store.search_hybrid(q, K_lex=k, K_sem=k, K_merge=k, alpha=alpha, graph_boost=graph_boost)
         ce_top_score = None
         if rerank and pairs:
             try:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import os
 from fastapi import FastAPI, HTTPException
@@ -10,6 +9,14 @@ from pydantic import BaseModel, Field
 
 from .qq_engine import Engine, DEFAULT_DB_URI
 from .qq_embeddings import get_embedder
+try:
+    from .store_sqlite import Store
+except Exception:
+    Store = None  # type: ignore
+try:
+    from .rerank import rerank_pairs
+except Exception:
+    rerank_pairs = None  # type: ignore
 
 
 class UpsertReq(BaseModel):
@@ -29,6 +36,22 @@ class SnapshotReq(BaseModel):
     to: str = Field(..., description="Absolute path to write the snapshot DB")
 
 
+class IndexExportReq(BaseModel):
+    out: str
+
+
+class IndexImportReq(BaseModel):
+    inp: str
+
+
+class Query2Req(BaseModel):
+    q: str
+    k: int = 6
+    alpha: float = 0.55
+    rerank: bool = False
+    graph_boost: bool = False
+
+
 def build_app() -> FastAPI:
     app = FastAPI(title="qq API (UDS)", version="0.1.0", default_response_class=ORJSONResponse)
 
@@ -39,6 +62,12 @@ def build_app() -> FastAPI:
         _ = emb.encode(["warmup"])  # prime caches
         db_path = os.getenv("QQ_DB", DEFAULT_DB_URI)
         app.state.engine = Engine(embedder=emb, db_uri=db_path)
+        # Initialize store for index admin and store-backed query
+        try:
+            if Store is not None:
+                app.state.store = Store()
+        except Exception:
+            app.state.store = None
 
     @app.post("/upsert")
     def upsert(req: UpsertReq):
@@ -68,6 +97,84 @@ def build_app() -> FastAPI:
             res = eng.snapshot(req.to)
             return res
         except Exception as e:  # pragma: no cover
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/index/stats")
+    def index_stats():
+        st = getattr(app.state, "store", None)
+        if st is None:
+            raise HTTPException(status_code=500, detail="store not initialized")
+        try:
+            return st.stats()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/index/export")
+    def index_export(req: IndexExportReq):
+        st = getattr(app.state, "store", None)
+        if st is None:
+            raise HTTPException(status_code=500, detail="store not initialized")
+        try:
+            path = st.export_to(req.out)
+            return {"ok": True, "out": path}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/index/import")
+    def index_import(req: IndexImportReq):
+        st = getattr(app.state, "store", None)
+        if st is None:
+            raise HTTPException(status_code=500, detail="store not initialized")
+        try:
+            st.import_from(req.inp)
+            return {"ok": True}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/query2")
+    def query2(req: Query2Req):
+        st = getattr(app.state, "store", None)
+        if st is None:
+            raise HTTPException(status_code=500, detail="store not initialized")
+        try:
+            pairs = st.search_hybrid(req.q, K_lex=req.k, K_sem=req.k, K_merge=req.k, alpha=req.alpha, graph_boost=req.graph_boost)
+            ce_top = None
+            if req.rerank and pairs and rerank_pairs is not None:
+                mp = st.get_chunks([cid for cid, _ in pairs])
+                passages = [mp.get(str(cid), {}).get("text", "") for cid, _ in pairs]
+                try:
+                    idx_scores = rerank_pairs("cross-encoder/ms-marco-MiniLM-L-6-v2", req.q, passages)
+                    if idx_scores:
+                        ce_top = float(idx_scores[0][1])
+                        pairs = [(pairs[i][0], pairs[i][1]) for i, _ in idx_scores][: req.k]
+                except Exception:
+                    pass
+            abstained = False
+            S_THRESH = 0.12
+            CE_THRESH = 0.20
+            if pairs:
+                if (pairs[0][1] < S_THRESH) and (ce_top is not None) and (ce_top < CE_THRESH):
+                    abstained = True
+            if abstained or not pairs:
+                return {"answer": "No relevant paragraph found.", "abstained": True}
+            top_id, top_score = pairs[0]
+            src = st.get_chunks([top_id]).get(str(top_id)) or {}
+            ans = (src.get("text") or "").split()
+            if len(ans) > 120:
+                ans = ans[:120]
+            answer = " ".join(ans)
+            return {
+                "answer": answer,
+                "source": {
+                    "chunk_id": top_id,
+                    "doc_id": src.get("doc_id"),
+                    "section_path": src.get("section_path"),
+                },
+                "scores": {"hybrid": float(top_score), "ce": ce_top},
+                "policy": "extractive_only",
+                "abstained": False,
+            }
+        except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
     return app

@@ -161,6 +161,15 @@ class Store:
                 )
                 """
             )
+            # FTS for nodes name lookups
+            self.conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                  name, node_id UNINDEXED
+                )
+                """
+            )
+
 
     # ---------- public API ----------
     def upsert_doc(self, *, doc_id: str, title: Optional[str], type_: str, source: str, tags: Optional[Dict[str, Any]] = None) -> None:
@@ -297,6 +306,83 @@ class Store:
         finally:
             src.close()
 
+
+    # ----- graph-lite -----
+    def upsert_node(self, *, kind: str, name: str, ref_chunk_id: int | None = None, extra: dict | None = None) -> int:
+        extra_json = json.dumps(extra) if extra is not None else None
+        row = self.conn.execute(
+            "SELECT node_id FROM nodes WHERE kind=? AND name=? AND (ref_chunk_id IS ? OR ref_chunk_id=?)",
+            (kind, name, ref_chunk_id, ref_chunk_id),
+        ).fetchone()
+        if row is not None:
+            node_id = int(row[0])
+        else:
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO nodes(kind, name, ref_chunk_id, extra) VALUES(?,?,?,?)",
+                    (kind, name, ref_chunk_id, extra_json),
+                )
+                node_id = int(cur.lastrowid)
+        try:
+            with self.conn:
+                self.conn.execute("INSERT INTO nodes_fts(name, node_id) VALUES(?, ?)", (name, node_id))
+        except Exception:
+            pass
+        return node_id
+
+    def build_graph_for_doc(self, doc_id: str) -> dict:
+        rows = self.conn.execute(
+            "SELECT chunk_id, section_path FROM chunks WHERE doc_id=?", (doc_id,)
+        ).fetchall()
+        created = 0
+        with self.conn:
+            for r in rows:
+                cid = int(r[0])
+                sp = r[1] if r[1] is not None else None
+                if not sp:
+                    continue
+                parts = [seg.strip() for seg in str(sp).split('>') if seg.strip()]
+                prev_node = None
+                for seg in parts:
+                    nid = self.upsert_node(kind='concept', name=seg, ref_chunk_id=cid, extra=None)
+                    created += 1
+                    if prev_node is not None:
+                        try:
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO edges(src, dst, rel, weight) VALUES(?,?,?,?)",
+                                (prev_node, nid, 'contains', 1.0),
+                            )
+                        except Exception:
+                            pass
+                    prev_node = nid
+        return {"ok": True, "created": created}
+
+    def _graph_match_chunk_ids(self, q: str) -> set[int]:
+        import re as _re
+        toks = _re.findall(r"\w+", q, flags=_re.UNICODE)[:16]
+        if not toks:
+            return set()
+        expr = " OR ".join(f'"{t}"' for t in toks)
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT n.ref_chunk_id FROM nodes n JOIN nodes_fts f ON f.node_id = n.node_id WHERE nodes_fts MATCH ?",
+                (expr,),
+            ).fetchall()
+            return {int(r[0]) for r in rows if r[0] is not None}
+        except Exception:
+            return set()
+
+    def _should_graph_boost(self, q: str, force: bool) -> bool:
+        if force:
+            return True
+        import re as _re
+        return bool(_re.search(r"\b(depends on|calls|before|after|owner|implements)\b", q, flags=_re.I))
+
+    def _apply_graph_boost(self, scores: dict[int, float], G: set[int], boost: float = 0.05, cap: float = 0.10) -> None:
+        for cid in list(scores.keys()):
+            if cid in G:
+                scores[cid] = scores[cid] + min(boost, cap)
+
     # ---------- retrieval ----------
     def _pack_vec(self, v: np.ndarray):
         try:
@@ -380,6 +466,7 @@ class Store:
         K_sem: int = 30,
         K_merge: int = 50,
         alpha: float = 0.55,
+        graph_boost: bool = False,
     ) -> List[Tuple[int, float]]:
         dense: List[Tuple[int, float]] = []
         if self._vec_enabled:
@@ -396,6 +483,14 @@ class Store:
             w = (1.0 - alpha) if self._vec_enabled else 1.0
             for cid, s in sparse:
                 scores[cid] = scores.get(cid, 0.0) + w * s
+        # Graph-lite boost
+        try:
+            if self._should_graph_boost(q, graph_boost):
+                G = self._graph_match_chunk_ids(q)
+                if G:
+                    self._apply_graph_boost(scores, G, 0.05, 0.10)
+        except Exception:
+            pass
         items = list(scores.items())
         items.sort(key=lambda t: t[1], reverse=True)
         return items[:K_merge]
