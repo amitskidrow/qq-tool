@@ -10,6 +10,7 @@ import httpx
 import typer
 
 app = typer.Typer(add_completion=False, help="qq CLI (UDS client)")
+index_app = typer.Typer(help="Index admin commands (new-arch store)")
 
 
 def _uds_path() -> str:
@@ -69,14 +70,42 @@ def ingest(path: str = typer.Argument(..., help="File or directory to ingest")):
             added += 1
         typer.echo(json.dumps({"ok": True, "ingested": added, "mode": "server"}))
     except Exception:
-        # Fallback to in-process engine
-        eng = _fallback_engine()
+        # Fallback to new-arch store
+        try:
+            from .store_sqlite import Store, ingest_text
+        except Exception as e:
+            # If store import fails, fallback to legacy engine
+            eng = _fallback_engine()
+            for f in _iter_files(p):
+                text = f.read_text(encoding="utf-8", errors="ignore")
+                doc_id = _hash_id(f)
+                eng.upsert(doc_id, text, {"path": str(f)})
+                added += 1
+            typer.echo(json.dumps({"ok": True, "ingested": added, "mode": "local-legacy"}))
+            return
+        store = Store()
+        totals = {"docs": 0, "chunks": 0, "duplicates": 0, "embedded": 0}
         for f in _iter_files(p):
             text = f.read_text(encoding="utf-8", errors="ignore")
             doc_id = _hash_id(f)
-            eng.upsert(doc_id, text, {"path": str(f)})
+            counts = ingest_text(
+                store,
+                doc_id=doc_id,
+                text=text,
+                title=f.name,
+                kind="prose",
+                section_path=None,
+                source=str(f),
+                tags=None,
+                embed=True,
+            )
+            totals["docs"] += counts.docs
+            totals["chunks"] += counts.chunks
+            totals["duplicates"] += counts.duplicates
+            totals["embedded"] += counts.embedded
             added += 1
-        typer.echo(json.dumps({"ok": True, "ingested": added, "mode": "local"}))
+        out = {"ok": True, "ingested": added, "mode": "local-store", **totals}
+        typer.echo(json.dumps(out))
 
 
 def _render_plain(
@@ -258,3 +287,45 @@ def info(json_out: bool = typer.Option(False, "--json", help="Output raw JSON"))
     if data['vector'].get('sqlite_vec_version'):
         lines.append(f"  sqlite-vec_version: {data['vector'].get('sqlite_vec_version')}")
     typer.echo("\n".join(lines))
+
+
+# ---- index admin (new-arch store) ----
+
+@index_app.command("stats")
+
+def index_stats(json_out: bool = typer.Option(False, "--json", help="Output raw JSON")):
+    try:
+        from .store_sqlite import Store
+    except Exception as e:
+        typer.echo(json.dumps({"ok": False, "error": f"store import failed: {e}"}))
+        raise typer.Exit(1)
+    store = Store()
+    st = store.stats()
+    if json_out:
+        typer.echo(json.dumps(st))
+        return
+    for k, v in st.items():
+        typer.echo(f"{k}: {v}")
+
+
+@index_app.command("export")
+
+def index_export(out: str = typer.Argument(..., help="Output .sqlite path")):
+    from .store_sqlite import Store
+
+    store = Store()
+    path = store.export_to(out)
+    typer.echo(json.dumps({"ok": True, "out": path}))
+
+
+@index_app.command("import")
+
+def index_import(inp: str = typer.Argument(..., help="Input .sqlite path")):
+    from .store_sqlite import Store
+
+    store = Store()
+    store.import_from(inp)
+    typer.echo(json.dumps({"ok": True}))
+
+
+app.add_typer(index_app, name="index")
