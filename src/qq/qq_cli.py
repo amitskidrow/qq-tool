@@ -3,35 +3,25 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import time
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable
 
 import httpx
-import time
 import typer
 
-app = typer.Typer(add_completion=False, help="qq CLI (UDS client)")
-index_app = typer.Typer(help="Index admin commands (new-arch store)")
+app = typer.Typer(add_completion=False, help="qq CLI (server-only, UDS client)")
+index_app = typer.Typer(help="Index admin commands (server store)")
 
 
 def _uds_path() -> str:
-    # Global default UDS path
     return os.getenv("QQ_UDS", "/run/qq.sock")
 
 
 def _client() -> httpx.Client:
     transport = httpx.HTTPTransport(uds=_uds_path())
-    # Base URL host/path is ignored with UDS, but required by httpx
     return httpx.Client(transport=transport, base_url="http://qq.local", timeout=30.0)
-
-
-# In-process fallback
-def _fallback_engine():
-    from .qq_engine import Engine, DEFAULT_DB_URI
-
-    db = os.getenv("QQ_DB", DEFAULT_DB_URI)
-    # Do not instantiate embedder here; Engine will decide based on vec availability
-    return Engine(db_uri=db)
 
 
 def _hash_id(path: Path) -> str:
@@ -43,19 +33,20 @@ def _hash_id(path: Path) -> str:
 def _iter_files(p: Path) -> Iterable[Path]:
     if p.is_file():
         yield p
-    else:
-        skip_dirs = {".git", "node_modules", "dist", "build", ".venv", "venv", "__pycache__"}
-        for f in p.rglob("*"):
-            parts = set(f.parts)
-            if parts & skip_dirs:
-                continue
-            if f.is_file() and f.suffix.lower() in {".txt", ".md", ".rst", ".log"}:
-                yield f
+        return
+    skip_dirs = {".git", "node_modules", "dist", "build", ".venv", "venv", "__pycache__"}
+    for f in p.rglob("*"):
+        parts = set(f.parts)
+        if parts & skip_dirs:
+            continue
+        if f.is_file() and f.suffix.lower() in {".txt", ".md", ".rst", ".log"}:
+            yield f
 
 
 @app.command()
-def ingest(path: str = typer.Argument(..., help="File or directory to ingest"),
-          graph_lite: bool = typer.Option(False, "--graph-lite/--no-graph-lite", help="Extract graph-lite from sections")):
+def ingest(
+    path: str = typer.Argument(..., help="File or directory to ingest"),
+):
     p = Path(path)
     if not p.exists():
         typer.echo(json.dumps({"ok": False, "error": f"path not found: {path}"}))
@@ -66,56 +57,14 @@ def ingest(path: str = typer.Argument(..., help="File or directory to ingest"),
         for f in _iter_files(p):
             text = f.read_text(encoding="utf-8", errors="ignore")
             doc_id = _hash_id(f)
-            payload = {"id": doc_id, "text": text, "meta": {"path": str(f)}}
+            payload = {"id": doc_id, "text": text, "meta": {"path": str(f), "title": f.name}}
             r = c.post("/upsert", json=payload)
             r.raise_for_status()
             added += 1
         typer.echo(json.dumps({"ok": True, "ingested": added, "mode": "server"}))
-    except Exception:
-        # Fallback to new-arch store
-        try:
-            from .store_sqlite import Store, ingest_text
-        except Exception as e:
-            # If store import fails, fallback to legacy engine
-            eng = _fallback_engine()
-            for f in _iter_files(p):
-                text = f.read_text(encoding="utf-8", errors="ignore")
-                doc_id = _hash_id(f)
-                eng.upsert(doc_id, text, {"path": str(f)})
-                added += 1
-            typer.echo(json.dumps({"ok": True, "ingested": added, "mode": "local-legacy"}))
-            return
-        store = Store()
-        totals = {"docs": 0, "chunks": 0, "duplicates": 0, "embedded": 0}
-        _docs: list[str] = []
-        for f in _iter_files(p):
-            text = f.read_text(encoding="utf-8", errors="ignore")
-            doc_id = _hash_id(f)
-            _docs.append(doc_id)
-            counts = ingest_text(
-                store,
-                doc_id=doc_id,
-                text=text,
-                title=f.name,
-                kind="prose",
-                section_path=None,
-                source=str(f),
-                tags=None,
-                embed=True,
-            )
-            totals["docs"] += counts.docs
-            totals["chunks"] += counts.chunks
-            totals["duplicates"] += counts.duplicates
-            totals["embedded"] += counts.embedded
-            added += 1
-        if graph_lite and _docs:
-            for _d in _docs:
-                try:
-                    store.build_graph_for_doc(_d)
-                except Exception:
-                    pass
-        out = {"ok": True, "ingested": added, "mode": "local-store", **totals}
-        typer.echo(json.dumps(out))
+    except Exception as e:
+        typer.echo(json.dumps({"ok": False, "error": f"server ingest failed: {e}"}))
+        raise typer.Exit(1)
 
 
 def _render_plain(
@@ -159,8 +108,6 @@ def query(
     graph_boost: bool = typer.Option(False, "--graph-boost/--no-graph-boost", help="Enable graph-lite boost"),
     json_out: bool = typer.Option(False, "--json", help="Output raw JSON"),
 ):
-    db = os.getenv("QQ_DB", os.path.expanduser("~/.qq/global.db"))
-    # Try server first
     try:
         c = _client()
         r = c.post(
@@ -200,146 +147,72 @@ def query(
         if meta_bits:
             lines.append(" | ".join(meta_bits))
         typer.echo("\n".join(lines))
-        return
-    except Exception:
-        pass
+    except Exception as e:
+        typer.echo(json.dumps({"ok": False, "error": f"server query failed: {e}"}))
+        raise typer.Exit(1)
 
-    # Prefer new-arch store fallback; if not available, use legacy engine
+
+@app.command()
+def doctor(json_out: bool = typer.Option(False, "--json", help="Output raw JSON report")):
+    """Check local server integration via UDS and basic ingest/query."""
+    report: dict[str, object] = {"ok": False, "uds": {}, "api": {}}
+    uds = _uds_path()
+    uds_ok = False
     try:
-        from .store_sqlite import Store
-        from .rerank import rerank_pairs
-        S_THRESH = 0.12
-        CE_THRESH = 0.20
-        t0 = time.perf_counter()
-        store = Store()
-        # Use k for all caps to keep CLI expectations simple
-        pairs = store.search_hybrid(q, K_lex=k, K_sem=k, K_merge=k, alpha=alpha, graph_boost=graph_boost)
-        ce_top_score = None
-        if rerank and pairs:
-            try:
-                chunk_ids = [cid for cid, _ in pairs]
-                mp = store.get_chunks(chunk_ids)
-                passages = [mp.get(str(cid), {}).get("text", "") for cid, _ in pairs]
-                idx_scores = rerank_pairs("cross-encoder/ms-marco-MiniLM-L-6-v2", q, passages)
-                # Reorder pairs using CE scores
-                ce_scores_map = {i: s for i, s in idx_scores}
-                pairs = [(pairs[i][0], pairs[i][1]) for i, _ in idx_scores][:k]
-                # Capture top CE
-                if idx_scores:
-                    ce_top_score = float(idx_scores[0][1])
-            except Exception:
-                # If rerank fails, keep hybrid order
-                ce_top_score = None
-        t1 = time.perf_counter()
-        mode = "hybrid-store" if store.vec_enabled else "fts-store"
-        elapsed = (t1 - t0) * 1000.0
-        # Abstain check
-        abstained = False
-        if pairs:
-            hybrid_top = float(pairs[0][1])
-            if ce_top_score is not None and hybrid_top < S_THRESH and ce_top_score < CE_THRESH:
-                abstained = True
-        # Convert to output
-        results = [] if abstained else [(str(cid), float(score)) for cid, score in pairs]
-        text_map = {}
-        if results:
-            chunk_ids = [int(rid) for rid, _ in results]
-            text_map = store.get_chunks(chunk_ids)
+        st = os.stat(uds)
+        is_sock = stat.S_ISSOCK(st.st_mode)
+        perm = oct(st.st_mode & 0o777)
+        report["uds"] = {"path": uds, "exists": True, "is_socket": is_sock, "perm": perm}
+        uds_ok = is_sock
+    except FileNotFoundError:
+        report["uds"] = {"path": uds, "exists": False}
         if json_out:
-            if abstained or not pairs:
-                out = {"answer": "No relevant paragraph found.", "abstained": True}
-            else:
-                top_id, top_score = pairs[0]
-                src = text_map.get(str(top_id), {})
-                words = (src.get("text") or "").split()
-                if len(words) > 120:
-                    words = words[:120]
-                answer = " ".join(words)
-                out = {
-                    "answer": answer,
-                    "source": {
-                        "chunk_id": top_id,
-                        "doc_id": src.get("doc_id"),
-                        "section_path": src.get("section_path"),
-                    },
-                    "scores": {"hybrid": float(top_score), "ce": ce_top_score},
-                    "policy": "extractive_only",
-                    "abstained": False,
-                }
-            typer.echo(json.dumps(out))
-            return
-        if abstained or not results:
-            typer.echo("No relevant paragraph found.")
-            return
-        # Pretty print single answer
-        top_id = int(results[0][0])
-        src = text_map.get(str(top_id), {})
-        words = (src.get("text") or "").split()
-        if len(words) > 120:
-            words = words[:120]
-        answer = " ".join(words)
-        lines: list[str] = []
-        lines.append(f"answer (<=120w):\n{answer}")
-        meta_bits = [f"chunk_id={top_id}"]
-        if src.get("doc_id") is not None:
-            meta_bits.append(f"doc_id={src.get('doc_id')}")
-        if src.get("section_path"):
-            meta_bits.append(f"section_path={src.get('section_path')}")
-        if results and isinstance(results[0][1], (int, float)):
-            meta_bits.append(f"hybrid={float(results[0][1]):.3f}")
-        if ce_top_score is not None:
-            meta_bits.append(f"ce={float(ce_top_score):.3f}")
-        lines.append(" | ".join(meta_bits) + f" | elapsed={int(elapsed)}ms")
-        typer.echo("\n".join(lines))
-        return
-    except Exception:
-        pass
-    # Legacy fallback
-    eng = _fallback_engine()
-    hits, tm = eng.query(q, k=k, alpha=alpha, rerank=rerank)
+            typer.echo(json.dumps(report))
+        else:
+            typer.echo("UDS not found; is the server running?")
+        raise typer.Exit(1)
+
+    api = {"connect": False, "index_stats": None, "smoke": None}
+    try:
+        c = _client()
+        # connectivity: index stats
+        resp = c.get("/index/stats")
+        api["connect"] = resp.status_code == 200
+        api["index_stats"] = resp.json() if resp.status_code == 200 else {"error": resp.text}
+        # smoke ingest + query
+        doc_id = f"qq:doctor:{int(time.time())}"
+        text = "Doctor smoke test: Jupiter is the largest planet."
+        up = c.post("/upsert", json={"id": doc_id, "text": text, "meta": {"path": "doctor"}})
+        up.raise_for_status()
+        qr = c.post("/query2", json={"q": "largest planet", "k": 3, "alpha": 0.55, "rerank": False, "graph_boost": False})
+        qr.raise_for_status()
+        data = qr.json()
+        api["smoke"] = data
+        report["api"] = api
+        report["ok"] = uds_ok and api["connect"] and bool(data and not data.get("abstained"))
+    except Exception as e:
+        api["error"] = str(e)
+        report["api"] = api
+        report["ok"] = False
+        if json_out:
+            typer.echo(json.dumps(report))
+            raise typer.Exit(1)
+        else:
+            typer.echo(f"doctor failed: {e}")
+            raise typer.Exit(1)
+
     if json_out:
-        data = {
-            "results": [{"id": h.id, "score": h.score} for h in hits],
-            "timings": tm.__dict__,
-        }
-        typer.echo(json.dumps(data))
-        return
-    results = [(h.id, h.score) for h in hits]
-    text_map = {}
-    if results:
-        ids = [rid for rid, _ in results]
-        qmarks = ",".join(["?"] * len(ids))
-        rows = eng._conn.execute(  # type: ignore[attr-defined]
-            f"SELECT id, text, meta FROM docs WHERE id IN ({qmarks})",
-            ids,
-        ).fetchall()
-        for r in rows:
-            rid = r["id"] if "id" in r.keys() else r[0]
-            text = r["text"] if "text" in r.keys() else r[1]
-            meta_raw = r["meta"] if "meta" in r.keys() else r[2]
-            path = None
-            try:
-                if meta_raw:
-                    meta = json.loads(meta_raw)
-                    path = meta.get("path") if isinstance(meta, dict) else None
-            except Exception:
-                path = None
-            text_map[rid] = {"text": text, "path": path}
-    mode = "hybrid" if getattr(eng, "vec_enabled", False) else "fts"
-    typer.echo(_render_plain(q, k, mode, db, results, tm.total_ms, texts=text_map))
+        typer.echo(json.dumps(report))
+    else:
+        typer.echo("doctor: OK" if report.get("ok") else "doctor: FAIL")
 
 
 @app.command()
 def snapshot(to: str = typer.Argument(..., help="Absolute path to write snapshot")):
-    try:
-        c = _client()
-        r = c.post("/snapshot", json={"to": to})
-        r.raise_for_status()
-        typer.echo(json.dumps(r.json()))
-    except Exception:
-        eng = _fallback_engine()
-        res = eng.snapshot(to)
-        typer.echo(json.dumps(res))
+    c = _client()
+    r = c.post("/snapshot", json={"to": to})
+    r.raise_for_status()
+    typer.echo(json.dumps(r.json()))
 
 
 @app.command()

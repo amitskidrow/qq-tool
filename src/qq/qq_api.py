@@ -17,6 +17,10 @@ try:
     from .rerank import rerank_pairs
 except Exception:
     rerank_pairs = None  # type: ignore
+try:
+    from .store_sqlite import ingest_text as store_ingest_text  # type: ignore
+except Exception:
+    store_ingest_text = None  # type: ignore
 
 
 class UpsertReq(BaseModel):
@@ -74,6 +78,29 @@ def build_app() -> FastAPI:
         try:
             eng: Engine = app.state.engine
             res = eng.upsert(req.id, req.text, req.meta)
+            # Mirror into Store if available so /query2 can find docs
+            st = getattr(app.state, "store", None)
+            if st is not None and store_ingest_text is not None:
+                try:
+                    title = None
+                    source = "api"
+                    if req.meta:
+                        title = req.meta.get("title") if isinstance(req.meta, dict) else None
+                        source = req.meta.get("path") or source if isinstance(req.meta, dict) else source
+                    store_ingest_text(
+                        st,
+                        doc_id=req.id,
+                        text=req.text,
+                        title=title,
+                        kind="prose",
+                        section_path=None,
+                        source=source,
+                        tags=None,
+                        embed=True,
+                    )
+                except Exception:
+                    # Do not fail the primary upsert if store ingest fails
+                    pass
             return {"ok": True, **res}
         except Exception as e:  # pragma: no cover
             raise HTTPException(status_code=500, detail=str(e))
