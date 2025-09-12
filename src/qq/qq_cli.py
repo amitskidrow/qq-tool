@@ -190,74 +190,42 @@ def snapshot(to: str = typer.Argument(..., help="Absolute path to write snapshot
 
 @app.command()
 def info(json_out: bool = typer.Option(False, "--json", help="Output raw JSON")):
-    """Print embedding backend and ONNX Runtime provider diagnostics."""
-    import os as _os
-    import onnxruntime as ort
-    from .qq_embeddings import get_embedder
-
-    data = {
-        "env": {
-            "QQ_EMBED_MODEL": _os.getenv("QQ_EMBED_MODEL"),
-            "QQ_ORT_PROVIDER": _os.getenv("QQ_ORT_PROVIDER"),
-            "QQ_ORT_PROVIDERS": _os.getenv("QQ_ORT_PROVIDERS"),
-        },
-        "ort": {
-            "available_providers": list(ort.get_available_providers()),
-            "version": getattr(ort, "__version__", None),
-        },
-        "embedding": {},
-        "vector": {},
-    }
-
-    # Embedder info (may download model on first run)
-    try:
-        emb = get_embedder()
-        _ = emb.encode(["warmup"])  # prime
-        info = getattr(emb, "info", None)
-        if info is not None:
-            data["embedding"] = {
-                "model": getattr(info, "model_name", None),
-                "backend": getattr(info, "backend", None),
-                "dim": getattr(info, "dim", None),
-                "warmed": getattr(info, "warmed", None),
-                "load_ms": getattr(info, "load_ms", None),
-                "providers": getattr(info, "providers", None),
-            }
-    except Exception as e:  # pragma: no cover
-        data["embedding"] = {"error": str(e)}
-
-    # sqlite-vec availability (Python package)
-    try:
-        import sqlite_vec  # type: ignore
-
-        data["vector"]["sqlite_vec"] = True
-        data["vector"]["sqlite_vec_version"] = getattr(sqlite_vec, "__version__", None)
-    except Exception:
-        data["vector"]["sqlite_vec"] = False
-
+    """Print server-side diagnostics for embedding, ORT, vector, and store."""
+    c = _client()
+    r = c.get("/info")
+    if r.status_code != 200:
+        typer.echo(json.dumps({"ok": False, "error": r.text}))
+        raise typer.Exit(1)
+    data = r.json()
     if json_out:
         typer.echo(json.dumps(data))
         return
-
-    # Human-readable output
-    lines = []
+    lines: list[str] = []
     lines.append("Embedding:")
-    emb = data.get("embedding", {})
-    if "error" in emb:
-        lines.append(f"  error: {emb['error']}")
+    emb = data.get("embedding") or {}
+    if isinstance(emb, dict) and "error" in emb:
+        lines.append(f"  error: {emb.get('error')}")
     else:
         lines.append(f"  model: {emb.get('model')}")
         lines.append(f"  backend: {emb.get('backend')}")
         lines.append(f"  dim: {emb.get('dim')}")
-        lines.append(f"  providers: {', '.join(emb.get('providers') or []) if emb.get('providers') else 'n/a'}")
+        providers = emb.get('providers') or []
+        lines.append(f"  providers: {', '.join(providers) if providers else 'n/a'}")
         lines.append(f"  load_ms: {int(emb.get('load_ms') or 0)}")
     lines.append("ONNX Runtime:")
-    lines.append(f"  available_providers: {', '.join(data['ort'].get('available_providers') or [])}")
-    lines.append(f"  version: {data['ort'].get('version')}")
+    ort = data.get("ort") or {}
+    lines.append(f"  available_providers: {', '.join(ort.get('available_providers') or [])}")
+    lines.append(f"  version: {ort.get('version')}")
     lines.append("Vector:")
-    lines.append(f"  sqlite-vec: {data['vector'].get('sqlite_vec')}")
-    if data['vector'].get('sqlite_vec_version'):
-        lines.append(f"  sqlite-vec_version: {data['vector'].get('sqlite_vec_version')}")
+    vec = data.get("vector") or {}
+    lines.append(f"  sqlite-vec: {vec.get('sqlite_vec')}")
+    if vec.get('sqlite_vec_version'):
+        lines.append(f"  sqlite-vec_version: {vec.get('sqlite_vec_version')}")
+    st = data.get("store_stats") or {}
+    if st:
+        lines.append("Store:")
+        for k, v in st.items():
+            lines.append(f"  {k}: {v}")
     typer.echo("\n".join(lines))
 
 

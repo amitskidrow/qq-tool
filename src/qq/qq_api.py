@@ -204,6 +204,55 @@ def build_app() -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/info")
+    def info():
+        """Return embedding/backend diagnostics from the server process."""
+        import onnxruntime as ort
+        data = {
+            "env": {
+                "QQ_EMBED_MODEL": os.getenv("QQ_EMBED_MODEL"),
+                "QQ_ORT_PROVIDER": os.getenv("QQ_ORT_PROVIDER"),
+                "QQ_ORT_PROVIDERS": os.getenv("QQ_ORT_PROVIDERS"),
+            },
+            "ort": {
+                "available_providers": list(ort.get_available_providers()),
+                "version": getattr(ort, "__version__", None),
+            },
+            "embedding": {},
+            "vector": {},
+        }
+        try:
+            emb = get_embedder()
+            _ = emb.encode(["warmup"])  # prime
+            info_obj = getattr(emb, "info", None)
+            if info_obj is not None:
+                data["embedding"] = {
+                    "model": getattr(info_obj, "model_name", None),
+                    "backend": getattr(info_obj, "backend", None),
+                    "dim": getattr(info_obj, "dim", None),
+                    "warmed": getattr(info_obj, "warmed", None),
+                    "load_ms": getattr(info_obj, "load_ms", None),
+                    "providers": getattr(info_obj, "providers", None),
+                }
+        except Exception as e:
+            data["embedding"] = {"error": str(e)}
+        # sqlite-vec availability
+        try:
+            import sqlite_vec  # type: ignore
+
+            data["vector"]["sqlite_vec"] = True
+            data["vector"]["sqlite_vec_version"] = getattr(sqlite_vec, "__version__", None)
+        except Exception:
+            data["vector"]["sqlite_vec"] = False
+        # store stats if available
+        st = getattr(app.state, "store", None)
+        if st is not None:
+            try:
+                data["store_stats"] = st.stats()
+            except Exception:
+                pass
+        return data
+
     return app
 
 
