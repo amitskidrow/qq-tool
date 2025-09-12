@@ -67,36 +67,9 @@ def ingest(
         raise typer.Exit(1)
 
 
-def _render_plain(
-    q: str,
-    k: int,
-    mode: str,
-    db: str,
-    results: List[Tuple[str, float]],
-    elapsed_ms: float,
-    texts: Optional[dict] = None,
-) -> str:
-    from qq import __version__
-    header = f"QQ {__version__} | mode={mode} | k={k} | db={db} | q=\"{q}\" | {int(elapsed_ms)}ms"
-    lines = [header]
-    for i, (rid, score) in enumerate(results, start=1):
-        # Always show id/score
-        lines.append(f"{i} | score={score:.4f} | id={rid}")
-        # If text content available (local mode), print a plain-text body block
-        if texts is not None and rid in texts:
-            body = texts[rid].get("text", "")
-            path = texts[rid].get("path") or ""
-            if path:
-                lines.append(f"path={path}")
-            # Trim excessively long output to keep terminal usable
-            max_chars = int(os.getenv("QQ_MAX_PRINT_CHARS", "4000"))
-            if max_chars > 0 and len(body) > max_chars:
-                lines.append(body[:max_chars])
-                lines.append(f"[... truncated {len(body) - max_chars} chars ...]")
-            else:
-                lines.append(body)
-    lines.append(f"results={len(results)} | elapsed={int(elapsed_ms)}ms")
-    return "\n".join(lines)
+"""
+Server-only CLI utilities.
+"""
 
 
 @app.command()
@@ -288,18 +261,17 @@ def info(json_out: bool = typer.Option(False, "--json", help="Output raw JSON"))
     typer.echo("\n".join(lines))
 
 
-# ---- index admin (new-arch store) ----
+# ---- index admin (server store) ----
 
 @index_app.command("stats")
 
 def index_stats(json_out: bool = typer.Option(False, "--json", help="Output raw JSON")):
-    try:
-        from .store_sqlite import Store
-    except Exception as e:
-        typer.echo(json.dumps({"ok": False, "error": f"store import failed: {e}"}))
+    c = _client()
+    r = c.get("/index/stats")
+    if r.status_code != 200:
+        typer.echo(json.dumps({"ok": False, "error": r.text}))
         raise typer.Exit(1)
-    store = Store()
-    st = store.stats()
+    st = r.json()
     if json_out:
         typer.echo(json.dumps(st))
         return
@@ -309,22 +281,24 @@ def index_stats(json_out: bool = typer.Option(False, "--json", help="Output raw 
 
 @index_app.command("export")
 
-def index_export(out: str = typer.Argument(..., help="Output .sqlite path")):
-    from .store_sqlite import Store
-
-    store = Store()
-    path = store.export_to(out)
-    typer.echo(json.dumps({"ok": True, "out": path}))
+def index_export(out: str = typer.Argument(..., help="Output .sqlite path on server")):
+    c = _client()
+    r = c.post("/index/export", json={"out": out})
+    if r.status_code != 200:
+        typer.echo(json.dumps({"ok": False, "error": r.text}))
+        raise typer.Exit(1)
+    typer.echo(json.dumps(r.json()))
 
 
 @index_app.command("import")
 
-def index_import(inp: str = typer.Argument(..., help="Input .sqlite path")):
-    from .store_sqlite import Store
-
-    store = Store()
-    store.import_from(inp)
-    typer.echo(json.dumps({"ok": True}))
+def index_import(inp: str = typer.Argument(..., help="Input .sqlite path on server")):
+    c = _client()
+    r = c.post("/index/import", json={"inp": inp})
+    if r.status_code != 200:
+        typer.echo(json.dumps({"ok": False, "error": r.text}))
+        raise typer.Exit(1)
+    typer.echo(json.dumps(r.json()))
 
 
 app.add_typer(index_app, name="index")
