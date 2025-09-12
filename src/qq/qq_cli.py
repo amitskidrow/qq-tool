@@ -8,7 +8,6 @@ from typing import Iterable, List, Optional, Tuple
 
 import httpx
 import time
-import time
 import typer
 
 app = typer.Typer(add_completion=False, help="qq CLI (UDS client)")
@@ -17,7 +16,7 @@ index_app = typer.Typer(help="Index admin commands (new-arch store)")
 
 def _uds_path() -> str:
     # Global default UDS path
-    return os.getenv("QQ_UDS", os.path.expanduser("~/.qq/qq.sock"))
+    return os.getenv("QQ_UDS", "/run/qq.sock")
 
 
 def _client() -> httpx.Client:
@@ -155,7 +154,7 @@ def _render_plain(
 def query(
     q: str = typer.Argument(..., help="Query text"),
     k: int = typer.Option(5, "--k", help="Top-K results"),
-    alpha: float = typer.Option(0.6, "--alpha", help="Dense weight [0,1] (hybrid only)"),
+    alpha: float = typer.Option(0.55, "--alpha", help="Dense weight [0,1] (hybrid only)"),
     rerank: bool = typer.Option(False, "--rerank/--no-rerank", help="Enable reranker"),
     graph_boost: bool = typer.Option(False, "--graph-boost/--no-graph-boost", help="Enable graph-lite boost"),
     json_out: bool = typer.Option(False, "--json", help="Output raw JSON"),
@@ -164,17 +163,43 @@ def query(
     # Try server first
     try:
         c = _client()
-        r = c.post("/query", json={"q": q, "k": k, "alpha": alpha, "rerank": rerank})
+        r = c.post(
+            "/query2",
+            json={
+                "q": q,
+                "k": k,
+                "alpha": alpha,
+                "rerank": rerank,
+                "graph_boost": graph_boost,
+            },
+        )
         r.raise_for_status()
         data = r.json()
         if json_out:
             typer.echo(json.dumps(data))
             return
-        results = [(h.get("id"), float(h.get("score", 0.0))) for h in data.get("results", [])]
-        elapsed = float(data.get("timings", {}).get("total_ms", 0.0))
-        # Mode unknown from server; approximate
-        mode = "hybrid"
-        typer.echo(_render_plain(q, k, mode, db, results, elapsed))
+        if data.get("abstained"):
+            typer.echo("No relevant paragraph found.")
+            return
+        answer = data.get("answer") or ""
+        scores = data.get("scores") or {}
+        src = data.get("source") or {}
+        lines: list[str] = []
+        lines.append(f"answer (<=120w):\n{answer}")
+        meta_bits = []
+        if src.get("doc_id") is not None:
+            meta_bits.append(f"doc_id={src.get('doc_id')}")
+        if src.get("section_path"):
+            meta_bits.append(f"section_path={src.get('section_path')}")
+        if src.get("chunk_id") is not None:
+            meta_bits.append(f"chunk_id={src.get('chunk_id')}")
+        if scores.get("hybrid") is not None:
+            meta_bits.append(f"hybrid={float(scores['hybrid']):.3f}")
+        if scores.get("ce") is not None:
+            meta_bits.append(f"ce={float(scores['ce']):.3f}")
+        if meta_bits:
+            lines.append(" | ".join(meta_bits))
+        typer.echo("\n".join(lines))
         return
     except Exception:
         pass
@@ -221,20 +246,51 @@ def query(
             chunk_ids = [int(rid) for rid, _ in results]
             text_map = store.get_chunks(chunk_ids)
         if json_out:
-            out = {
-                "results": [{"id": rid, "score": sc} for rid, sc in results],
-                "timings": {"total_ms": elapsed},
-            }
-            if abstained:
-                out["abstained"] = True
-                out["answer"] = "No relevant paragraph found."
-                out["scores"] = {"hybrid_top": pairs[0][1] if pairs else 0.0, "ce_top": ce_top_score}
+            if abstained or not pairs:
+                out = {"answer": "No relevant paragraph found.", "abstained": True}
+            else:
+                top_id, top_score = pairs[0]
+                src = text_map.get(str(top_id), {})
+                words = (src.get("text") or "").split()
+                if len(words) > 120:
+                    words = words[:120]
+                answer = " ".join(words)
+                out = {
+                    "answer": answer,
+                    "source": {
+                        "chunk_id": top_id,
+                        "doc_id": src.get("doc_id"),
+                        "section_path": src.get("section_path"),
+                    },
+                    "scores": {"hybrid": float(top_score), "ce": ce_top_score},
+                    "policy": "extractive_only",
+                    "abstained": False,
+                }
             typer.echo(json.dumps(out))
             return
-        if abstained:
+        if abstained or not results:
             typer.echo("No relevant paragraph found.")
             return
-        typer.echo(_render_plain(q, k, mode, db, results, elapsed, texts=text_map))
+        # Pretty print single answer
+        top_id = int(results[0][0])
+        src = text_map.get(str(top_id), {})
+        words = (src.get("text") or "").split()
+        if len(words) > 120:
+            words = words[:120]
+        answer = " ".join(words)
+        lines: list[str] = []
+        lines.append(f"answer (<=120w):\n{answer}")
+        meta_bits = [f"chunk_id={top_id}"]
+        if src.get("doc_id") is not None:
+            meta_bits.append(f"doc_id={src.get('doc_id')}")
+        if src.get("section_path"):
+            meta_bits.append(f"section_path={src.get('section_path')}")
+        if results and isinstance(results[0][1], (int, float)):
+            meta_bits.append(f"hybrid={float(results[0][1]):.3f}")
+        if ce_top_score is not None:
+            meta_bits.append(f"ce={float(ce_top_score):.3f}")
+        lines.append(" | ".join(meta_bits) + f" | elapsed={int(elapsed)}ms")
+        typer.echo("\n".join(lines))
         return
     except Exception:
         pass

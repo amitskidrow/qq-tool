@@ -2,12 +2,7 @@ import sys
 from typing import List, Optional
 
 from . import __version__
-try:
-    # New UDS-based CLI
-    from .qq_cli import app  # type: ignore
-except Exception:
-    # Fallback to legacy CLI if import fails
-    from .cli import app  # type: ignore
+from .qq_cli import app  # type: ignore
 
 
 def main(argv: Optional[List[str]] = None):
