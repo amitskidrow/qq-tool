@@ -278,8 +278,15 @@ def tui(snapshot: str = typer.Option(None, "--snapshot", help="Path to snapshot 
     try:
         # Lazy import; textual is part of optional extra 'ui'
         from .tui.app import run as run_tui  # type: ignore
-    except Exception:
-        typer.echo("TUI dependencies missing. Install with: pip install .[ui]")
+    except ImportError as e:
+        # Provide safe cross-shell instructions (quote extras to avoid globbing)
+        msg = (
+            "TUI dependencies not installed ({}).\n"
+            "Install one of:\n"
+            "  - pip install 'qq[ui]'\n"
+            "  - pip install -e '.[ui]'  # from repo root\n"
+        ).format(getattr(e, 'name', 'import error'))
+        typer.echo(msg)
         raise typer.Exit(1)
     try:
         run_tui(snapshot)
