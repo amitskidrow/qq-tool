@@ -15,8 +15,32 @@ class LiveBackend(Backend):
 
     async def _client_get(self) -> httpx.AsyncClient:
         if self._client is None:
-            transport = httpx.HTTPTransport(uds=uds_path())
-            self._client = httpx.AsyncClient(transport=transport, base_url="http://qq.local", timeout=30.0)
+            try:
+                transport = httpx.AsyncHTTPTransport(uds=uds_path())
+                self._client = httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://qq.local",
+                    timeout=30.0,
+                )
+            except AttributeError as e:
+                # Friendly message for transport mismatch on older code/installs
+                raise RuntimeError(
+                    "httpx transport mismatch: AsyncClient requires AsyncHTTPTransport. "
+                    "Upgrade qq/httpx and try again (pip install -U httpx)."
+                ) from e
+            except OSError as e:
+                # Common UDS errors: not found or permission denied
+                import errno as _errno
+
+                if e.errno == _errno.ENOENT:
+                    raise RuntimeError(
+                        f"UDS not found at {uds_path()}. Ensure the qq API is running and QQ_UDS is correct."
+                    ) from e
+                if e.errno in (_errno.EPERM, _errno.EACCES):
+                    raise RuntimeError(
+                        f"Permission denied opening UDS at {uds_path()}. Try sudo or adjust socket perms."
+                    ) from e
+                raise
         return self._client
 
     async def list_docs(self, q: Optional[str], like: Optional[str], limit: int, offset: int) -> Page:

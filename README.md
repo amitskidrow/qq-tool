@@ -22,6 +22,7 @@ TUI (read-only)
 - Offline snapshot: `qq tui --snapshot ./qq.db`
 - Keybinds: `/` search, `Enter` open, `e` export JSONL, `b` toggle backend.
  - Install extras (if not already): `pip install 'qq[ui]'` or from repo: `pip install -e '.[ui]'`
+ - Note: Live mode uses httpx AsyncHTTPTransport over UDS and requires httpx>=0.27.
 
 Architecture
 
