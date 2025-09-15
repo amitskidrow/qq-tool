@@ -66,11 +66,11 @@ origin_spec() {
   if [[ -z "$origin" ]]; then
     echo ""; return 0
   fi
-  # Prefer explicit deploy branch, defaulting to api_sql_arch for this migration
+  # Prefer explicit deploy branch; default to feature_qq_tui for this workstream
   local branch
-  branch=${DEPLOY_BRANCH:-new-arch-v1}
+  branch=${DEPLOY_BRANCH:-feature_qq_tui}
   if [[ -z "$branch" ]]; then
-    branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "new-arch-v1")
+    branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "feature_qq_tui")
   fi
   local https
   if [[ "$origin" =~ ^git@github.com:(.*)\.git$ ]]; then
