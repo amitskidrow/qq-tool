@@ -16,6 +16,12 @@ Quickstart
 - Query: `qq query "your question"`
 - Snapshot: `qq snapshot /absolute/path/to/qq.db`
 
+TUI (read-only)
+
+- Live (UDS): `qq tui`
+- Offline snapshot: `qq tui --snapshot ./qq.db`
+- Keybinds: `/` search, `Enter` open, `e` export JSONL, `b` toggle backend.
+
 Architecture
 
 - In‑Memory DB: `file:qqmem?mode=memory&cache=shared` (shared across connections in the API process)

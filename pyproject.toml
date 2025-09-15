@@ -34,3 +34,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qq"]
+
+[project.optional-dependencies]
+ui = [
+  "textual>=0.56"
+]

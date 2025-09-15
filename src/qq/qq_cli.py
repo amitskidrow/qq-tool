@@ -270,3 +270,19 @@ def index_import(inp: str = typer.Argument(..., help="Input .sqlite path on serv
 
 
 app.add_typer(index_app, name="index")
+
+
+@app.command()
+def tui(snapshot: str = typer.Option(None, "--snapshot", help="Path to snapshot .sqlite for offline mode")):
+    """Launch the Textual TUI to list/search/preview ingested data."""
+    try:
+        # Lazy import; textual is part of optional extra 'ui'
+        from .tui.app import run as run_tui  # type: ignore
+    except Exception:
+        typer.echo("TUI dependencies missing. Install with: pip install .[ui]")
+        raise typer.Exit(1)
+    try:
+        run_tui(snapshot)
+    except Exception as e:
+        typer.echo(json.dumps({"ok": False, "error": str(e)}))
+        raise typer.Exit(1)
