@@ -104,8 +104,8 @@ install_remote() {
 
   # Prefer global install with uv tool so 'which qq' resolves
   if command -v uv >/dev/null 2>&1; then
-    echo "Installing globally via: uv tool install --force --from $spec qq"
-    if UV_TOOL_OUT=$(uv tool install --force --from "$spec" qq 2>&1); then
+    echo "Installing globally via: uv tool install --force --from $spec 'qq[ui]'"
+    if UV_TOOL_OUT=$(uv tool install --force --from "$spec" 'qq[ui]' 2>&1); then
       echo "$UV_TOOL_OUT" | sed -n '1,80p'
       echo "qq --version -> $(qq --version 2>&1 || true)"
       echo "which qq -> $(command -v qq || echo not found)"
@@ -117,16 +117,16 @@ install_remote() {
 
   # Fallback to pipx if available (support both new and old pipx)
   if command -v pipx >/dev/null 2>&1; then
-    echo "Installing globally via: pipx install --force --spec $spec qq (or legacy syntax)"
-    if PIPX_OUT=$(pipx install --force --spec "$spec" qq 2>&1); then
+    echo "Installing globally via: pipx install --force --spec $spec 'qq[ui]' (or legacy syntax)"
+    if PIPX_OUT=$(pipx install --force --spec "$spec" 'qq[ui]' 2>&1); then
       echo "$PIPX_OUT" | sed -n '1,80p'
       echo "qq --version -> $(qq --version 2>&1 || true)"
       echo "which qq -> $(command -v qq || echo not found)"
       return 0
     else
       # Legacy pipx (no --spec); try positional VCS spec
-      echo "pipx --spec not supported; trying: pipx install --force $spec"
-      if PIPX_OUT2=$(pipx install --force "$spec" 2>&1); then
+      echo "pipx --spec not supported; trying: pipx install --force ${spec}#egg=qq[ui]"
+      if PIPX_OUT2=$(pipx install --force "${spec}#egg=qq[ui]" 2>&1); then
         echo "$PIPX_OUT2" | sed -n '1,80p'
         echo "qq --version -> $(qq --version 2>&1 || true)"
         echo "which qq -> $(command -v qq || echo not found)"
@@ -139,8 +139,8 @@ install_remote() {
 
   # Final fallback: install from local checkout
   if command -v uv >/dev/null 2>&1; then
-    echo "Falling back to local install via uv tool"
-    if UV_TOOL_OUT2=$(uv tool install --force --from . qq 2>&1); then
+    echo "Falling back to local install via uv tool with extras"
+    if UV_TOOL_OUT2=$(uv tool install --force --from . 'qq[ui]' 2>&1); then
       echo "$UV_TOOL_OUT2" | sed -n '1,80p'
       echo "qq --version -> $(qq --version 2>&1 || true)"
       echo "which qq -> $(command -v qq || echo not found)"
@@ -148,8 +148,8 @@ install_remote() {
     fi
   fi
   if command -v pipx >/dev/null 2>&1; then
-    echo "Falling back to local install via pipx"
-    if PIPX_OUT3=$(pipx install --force . 2>&1); then
+    echo "Falling back to local install via pipx with extras"
+    if PIPX_OUT3=$(pipx install --force '.[ui]' 2>&1); then
       echo "$PIPX_OUT3" | sed -n '1,80p'
       echo "qq --version -> $(qq --version 2>&1 || true)"
       echo "which qq -> $(command -v qq || echo not found)"

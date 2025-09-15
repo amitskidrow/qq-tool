@@ -6,6 +6,9 @@ import os
 import stat
 import time
 from pathlib import Path
+import sys
+import subprocess
+import importlib
 from typing import Iterable
 
 import httpx
@@ -272,20 +275,60 @@ def index_import(inp: str = typer.Argument(..., help="Input .sqlite path on serv
 app.add_typer(index_app, name="index")
 
 
+def _attempt_install_tui_deps() -> bool:
+    """Try to install Textual into the current environment after user confirmation.
+
+    Returns True if install appears successful, False otherwise.
+    """
+    ok = typer.confirm("Install Textual (textual>=0.56) into current qq environment?", default=True)
+    if not ok:
+        return False
+    cmd = [sys.executable, "-m", "pip", "install", "textual>=0.56"]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, text=True)
+        if proc.returncode == 0:
+            typer.echo("Installed Textual successfully.")
+            return True
+        else:
+            typer.echo("Failed to install Textual via pip. Output:")
+            typer.echo(proc.stdout[-2000:])
+            return False
+    except Exception as e:
+        typer.echo(f"Auto-install failed: {e}")
+        return False
+
+
 @app.command()
-def tui(snapshot: str = typer.Option(None, "--snapshot", help="Path to snapshot .sqlite for offline mode")):
+def tui(
+    snapshot: str = typer.Option(None, "--snapshot", help="Path to snapshot .sqlite for offline mode"),
+    install: bool = typer.Option(False, "--install", help="Attempt to auto-install TUI dependencies if missing"),
+):
     """Launch the Textual TUI to list/search/preview ingested data."""
     try:
         # Lazy import; textual is part of optional extra 'ui'
         from .tui.app import run as run_tui  # type: ignore
     except ImportError as e:
-        # Provide safe cross-shell instructions (quote extras to avoid globbing)
+        missing = getattr(e, "name", "textual")
+        if install:
+            if _attempt_install_tui_deps():
+                importlib.invalidate_caches()
+                try:
+                    from .tui.app import run as run_tui  # type: ignore
+                except Exception as e2:  # pragma: no cover - rare
+                    typer.echo(json.dumps({"ok": False, "error": f"post-install import failed: {e2}"}))
+                    raise typer.Exit(1)
+            else:
+                raise typer.Exit(1)
+        # Provide safe cross-shell instructions (quote extras to avoid globbing) and tool hints
         msg = (
-            "TUI dependencies not installed ({}).\n"
+            f"TUI dependencies not installed ({missing}).\n"
             "Install one of:\n"
             "  - pip install 'qq[ui]'\n"
             "  - pip install -e '.[ui]'  # from repo root\n"
-        ).format(getattr(e, 'name', 'import error'))
+            "  - uv tool install --force --from . 'qq[ui]'  # if using uv tool\n"
+            "  - pipx inject qq textual>=0.56  # if installed via pipx\n"
+            "Or re-run with '--install' to auto-install Textual here.\n"
+        )
         typer.echo(msg)
         raise typer.Exit(1)
     try:
