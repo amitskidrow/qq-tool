@@ -9,7 +9,9 @@ from pathlib import Path
 import sys
 import subprocess
 import importlib
-from typing import Iterable
+from typing import Iterable, Optional
+
+from . import __version__
 
 import httpx
 import typer
@@ -25,6 +27,37 @@ def _uds_path() -> str:
 def _client() -> httpx.Client:
     transport = httpx.HTTPTransport(uds=_uds_path())
     return httpx.Client(transport=transport, base_url="http://qq.local", timeout=30.0)
+
+
+def _fetch_server_status() -> Optional[dict[str, object]]:
+    """Best-effort fetch of API status/capabilities."""
+    try:
+        c = _client()
+        try:
+            resp = c.get("/status")
+        finally:
+            c.close()
+    except Exception:
+        return None
+    if resp.status_code == 404:
+        return {"ok": False, "capabilities": [], "version": None}
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    caps = data.get("capabilities")
+    if isinstance(caps, list):
+        caps = [str(c) for c in caps if isinstance(c, str)]
+    else:
+        caps = []
+    out = {
+        "ok": bool(data.get("ok", True)),
+        "version": data.get("version"),
+        "capabilities": caps,
+    }
+    return out
 
 
 def _hash_id(path: Path) -> str:
@@ -304,6 +337,7 @@ def tui(
     install: bool = typer.Option(False, "--install", help="Attempt to auto-install TUI dependencies if missing"),
 ):
     """Launch the Textual TUI to list/search/preview ingested data."""
+    status = _fetch_server_status()
     try:
         # Lazy import; textual is part of optional extra 'ui'
         from .tui.app import run as run_tui  # type: ignore
@@ -331,8 +365,41 @@ def tui(
         )
         typer.echo(msg)
         raise typer.Exit(1)
+    prefer_snapshot = False
+    enable_live = True
+    caps = set()
+    status_caps = status.get("capabilities") if isinstance(status, dict) else None
+    if isinstance(status_caps, list):
+        caps = {str(c) for c in status_caps}
+    if snapshot:
+        if status is None:
+            typer.echo(
+                "qq API unreachable at %s; starting in snapshot-only mode." % _uds_path()
+            )
+            enable_live = False
+            prefer_snapshot = True
+        elif "index_list" not in caps:
+            typer.echo(
+                "qq API at %s lacks TUI endpoints; using snapshot backend only." % _uds_path()
+            )
+            enable_live = False
+            prefer_snapshot = True
+    else:
+        if status is None:
+            typer.echo(
+                "qq API unreachable at %s. Start the server or rerun with --snapshot /path/to.db." % _uds_path()
+            )
+            raise typer.Exit(1)
+        if "index_list" not in caps:
+            server_version = status.get("version") if isinstance(status, dict) else "unknown"
+            typer.echo(
+                "qq API at %s (version=%s) does not expose the TUI endpoints. "
+                "Redeploy the API to match cli version %s or launch with --snapshot." %
+                (_uds_path(), server_version or "unknown", __version__)
+            )
+            raise typer.Exit(1)
     try:
-        run_tui(snapshot)
+        run_tui(snapshot, enable_live=enable_live, prefer_snapshot=prefer_snapshot)
     except Exception as e:
         typer.echo(json.dumps({"ok": False, "error": str(e)}))
         raise typer.Exit(1)

@@ -154,22 +154,37 @@ class QQTui(App):
         await self._load_page(reset=True)
 
 
-def run(snapshot: Optional[str] = None) -> None:
+def run(
+    snapshot: Optional[str] = None,
+    *,
+    enable_live: bool = True,
+    prefer_snapshot: bool = False,
+) -> None:
     """Launch the Textual TUI.
 
-    If `snapshot` is provided, run with snapshot backend only.
-    Otherwise, prefer live backend; if snapshot is provided additionally, set it as alt backend.
+    Parameters
+    ----------
+    snapshot:
+        Optional snapshot database path for offline mode.
+    enable_live:
+        Whether to connect to the live HTTP API backend.
+    prefer_snapshot:
+        When both backends are available, choose snapshot as primary.
     """
-    live: Backend | None = LiveBackend()
+    live: Backend | None = LiveBackend() if enable_live else None
     snap: Backend | None = SnapshotBackend(snapshot) if snapshot else None
-    backend: Backend
+
+    backend: Backend | None
     alt: Backend | None = None
-    if snapshot and live:
+    if prefer_snapshot and snap is not None:
+        backend, alt = snap, live
+    elif live is not None:
         backend, alt = live, snap
-    elif snapshot and not live:
-        backend = snap  # type: ignore[assignment]
+    elif snap is not None:
+        backend, alt = snap, None
     else:
-        backend = live  # type: ignore[assignment]
+        raise RuntimeError(
+            "No backend available for qq tui. Provide --snapshot or ensure the qq API is running."
+        )
     app = QQTui(backend=backend, alt_backend=alt)
     app.run()
-

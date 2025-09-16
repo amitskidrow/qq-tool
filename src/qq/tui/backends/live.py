@@ -4,6 +4,7 @@ from typing import Iterable, Optional
 
 import httpx
 
+from .. import __version__
 from ..config import uds_path
 from ..models import DocDetail, Page
 from .base import Backend
@@ -43,6 +44,13 @@ class LiveBackend(Backend):
                 raise
         return self._client
 
+    def _missing_route_message(self) -> str:
+        return (
+            "qq API at %s does not expose the document browsing endpoints. "
+            "Redeploy the server to qq version %s (or newer) or run `qq tui --snapshot <db>`." %
+            (uds_path(), __version__)
+        )
+
     async def list_docs(self, q: Optional[str], like: Optional[str], limit: int, offset: int) -> Page:
         c = await self._client_get()
         params = {"limit": limit, "offset": offset}
@@ -50,8 +58,13 @@ class LiveBackend(Backend):
             params["q"] = q
         elif like:
             params["like"] = like
-        r = await c.get("/index/list", params=params)
-        r.raise_for_status()
+        try:
+            r = await c.get("/index/list", params=params)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise RuntimeError(self._missing_route_message()) from exc
+            raise
         return r.json()
 
     async def get_doc(self, *, id: Optional[str] = None, uri: Optional[str] = None) -> DocDetail:
@@ -63,8 +76,13 @@ class LiveBackend(Backend):
             params["id"] = id
         if uri:
             params["uri"] = uri
-        r = await c.get("/index/get", params=params)
-        r.raise_for_status()
+        try:
+            r = await c.get("/index/get", params=params)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise RuntimeError(self._missing_route_message()) from exc
+            raise
         return r.json()
 
     async def export(self, *, ids: Optional[Iterable[str]] = None, q: Optional[str] = None, to_path: str) -> str:
@@ -75,7 +93,12 @@ class LiveBackend(Backend):
         elif q:
             params["q"] = q
         async with c.stream("GET", "/export", params=params) as resp:
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise RuntimeError(self._missing_route_message()) from exc
+                raise
             with open(to_path, "wb") as f:
                 async for chunk in resp.aiter_bytes():
                     f.write(chunk)

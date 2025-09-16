@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .qq_engine import Engine, DEFAULT_DB_URI
 from .qq_embeddings import get_embedder
 try:
@@ -73,6 +74,15 @@ def build_app() -> FastAPI:
                 app.state.store = Store()
         except Exception:
             app.state.store = None
+
+    @app.get("/status")
+    def status():
+        """Return API version and advertised capabilities."""
+        caps: list[str] = []
+        st = getattr(app.state, "store", None)
+        if st is not None:
+            caps.extend(["index_list", "index_get", "index_export"])
+        return {"ok": True, "version": __version__, "capabilities": caps}
 
     @app.post("/upsert")
     def upsert(req: UpsertReq):

@@ -23,6 +23,7 @@ TUI (read-only)
 - Keybinds: `/` search, `Enter` open, `e` export JSONL, `b` toggle backend.
  - Install extras (if not already): `pip install 'qq[ui]'` or from repo: `pip install -e '.[ui]'`
  - Note: Live mode uses httpx AsyncHTTPTransport over UDS and requires httpx>=0.27.
+  - Compatibility: the API must advertise `index_list` via `/status` (qq API ≥ current CLI). The CLI refuses to launch live mode otherwise and suggests redeploying or using `--snapshot`.
 
 Architecture
 
